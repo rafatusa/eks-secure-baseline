@@ -15,13 +15,21 @@
 # filter, do not remove --exit-code, and do not add an entry here without a
 # written justification.
 #
+# Two classes of exception are recorded below and they are NOT equivalent:
+#
+#   NOT REMEDIABLE   — the control cannot be satisfied by any configuration
+#                      that preserves the component's function (AWS-0104).
+#   ACCEPTED RISK    — the control IS remediable, but only by a design the
+#                      project has explicitly rejected, and a compensating
+#                      control is in place (AWS-0040, AWS-0041).
+#
 # Reviewed: 2026-09-19
 
 # -------------------------------------------------------------------------
 # AWS-0104 — "Security group rule allows egress to multiple public internet
 #             addresses" (aws_vpc_security_group_egress_rule.cluster_egress)
 # -------------------------------------------------------------------------
-# ACCEPTED RISK — not remediable for an EKS control plane security group.
+# NOT REMEDIABLE for an EKS control plane security group.
 #
 # The EKS control plane's cross-account ENIs must reach worker node kubelets
 # on ephemeral ports and regional AWS service endpoints (STS, ECR, CloudWatch
@@ -39,3 +47,58 @@
 #     metadata endpoint (169.254.169.254).
 #   * Nodes have no public IPs and sit in private subnets behind a NAT gateway.
 AWS-0104
+
+# -------------------------------------------------------------------------
+# AWS-0040 — "Public cluster access is enabled"
+#             (aws_eks_cluster.main: endpoint_public_access = true)
+# AWS-0041 — "Cluster allows access from a public CIDR"
+#             (aws_eks_cluster.main: public_access_cidrs)
+# -------------------------------------------------------------------------
+# ACCEPTED RISK — remediable in principle, deliberately not remediated.
+#
+# These two checks are only satisfiable by endpoint_public_access = false
+# (a fully private API endpoint). AWS-0041 in particular cannot be satisfied
+# by ANY real administrative address: it requires a private CIDR range, so
+# even a single-host /32 of a genuine public IP still fails it. Locking the
+# allowlist — which this project does — does not and cannot clear it.
+#
+# A fully private endpoint was evaluated and rejected for this build: CI runs
+# on GitHub-hosted runners, so a private endpoint requires a self-hosted
+# runner, a bastion, or a VPN inside the VPC. That is a Tier-2
+# re-architecture with new always-on infrastructure and cost, not a
+# configuration fix, and it was out of scope for an internal hardening
+# baseline.
+#
+# WHAT IS ACTUALLY IN PLACE (the compensating control, and it is real):
+#   * public_access_cidrs is locked to a SINGLE administrative host (/32).
+#     It is NOT 0.0.0.0/0. The network path is open to exactly one address.
+#   * infra/variables.tf enforces this in code: validation blocks REJECT
+#     0.0.0.0/0 and reject any prefix broader than /24. The open-endpoint
+#     configuration that these checks warn about cannot be reintroduced by
+#     editing a variable — terraform refuses to plan.
+#   * scripts/verify-api-restriction.sh asserts the live cluster's
+#     resolved public_access_cidrs on EVERY deploy, so drift between the
+#     declared and effective allowlist fails the pipeline.
+#   * CI's temporary access is self-scoped and self-revoking: a single /32
+#     for the runner, added and removed by scripts/ci-api-access.sh via a
+#     'trap ... EXIT INT TERM' so the entry is withdrawn even on failure,
+#     abort, cancellation or timeout. Steady state is always the single
+#     administrative /32.
+#   * endpoint_private_access is also enabled, so in-VPC traffic never
+#     traverses the public endpoint.
+#   * Network reachability is the OUTERMOST layer only: AWS IAM
+#     authentication and Kubernetes RBAC both still apply, and the audit
+#     log records every API call.
+#
+# NOT HIDDEN FROM THE REPORT: this suppression affects the CI gate only.
+# kube-bench still assesses the API endpoint against the CIS EKS Benchmark
+# on every run, and that assessment appears in the published compliance
+# report. The exception is recorded here so the gate reflects a reviewed
+# decision, not so the finding disappears.
+#
+# REVISIT IF: a compliance requirement forbids any public endpoint, or a
+# self-hosted runner / bastion becomes available — at which point
+# endpoint_public_access = false clears both checks for real and these two
+# entries should be deleted.
+AWS-0040
+AWS-0041

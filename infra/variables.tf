@@ -34,15 +34,28 @@ variable "api_allowed_cidr" {
     deliberately NOT a routable address, so a misconfigured deploy fails
     closed rather than exposing the API server to the internet.
 
-    A public value such as 0.0.0.0/0 is rejected by the validation block:
-    an internet-reachable API endpoint is a CRITICAL finding under both the
-    CIS Amazon EKS Benchmark and Trivy's AWS-0041 check, and this project
-    exists to be compliant, not to document its own exceptions.
+    The validation blocks below are the PRIMARY security control for the
+    API endpoint, and they are enforced by terraform itself: an open CIDR
+    (0.0.0.0/0) and any prefix broader than /24 are both rejected at plan
+    time. The exposed-endpoint configuration cannot be reintroduced by
+    editing a variable or a secret.
+
+    SCANNER NOTE: Trivy's AWS-0040 and AWS-0041 checks are suppressed for
+    infra/ in .trivyignore. This is an ACCEPTED RISK, not a passed check.
+    AWS-0041 demands a PRIVATE CIDR range, so it cannot be satisfied by any
+    real administrative address — even a single-host /32 of a genuine public
+    IP still fails it; only endpoint_public_access = false clears both. That
+    fully private design was evaluated and rejected because CI runs on
+    GitHub-hosted runners and would require a self-hosted runner, bastion or
+    VPN. See .trivyignore for the full justification and compensating
+    controls. kube-bench still assesses this endpoint on every run and the
+    finding appears in the published compliance report.
 
     CI runners do NOT need a permanent entry here. The pipeline's kubectl
     stages add the runner's own public IP to the cluster's public access
-    CIDR list for the duration of the job and remove it afterwards, so the
-    steady-state allowlist stays exactly this one administrative host.
+    CIDR list for the duration of the job and remove it afterwards via a
+    trap, so the steady-state allowlist stays exactly this one
+    administrative host.
   EOT
   type        = string
   default     = "203.0.113.1/32"

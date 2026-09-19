@@ -90,6 +90,21 @@ automountServiceAccountToken: true
 ---
 # kube-bench reads node and kubelet configuration. It needs no API write
 # access whatsoever.
+#
+# NOTE ON 'nodes/proxy' (KSV-0047): this subresource is deliberately NOT
+# granted. Access to nodes/proxy allows a holder to call the kubelet API
+# directly, which bypasses the API server's authorization and audit logging
+# and is a recognised privilege-escalation path.
+#
+# kube-bench does not need it: the CIS EKS Benchmark reads kubelet
+# configuration, systemd units and certificate files FROM THE NODE
+# FILESYSTEM through the Job's read-only hostPath mounts, and reads kubelet
+# process arguments through the host PID namespace. Neither path touches the
+# kubelet API. scripts/run-kube-bench.sh likewise only uses
+# apply/wait/get pods/logs against the API server.
+#
+# It was granted defensively in the first revision and removed once verified
+# unused — an unused permission is still a granted permission.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -98,7 +113,6 @@ rules:
   - apiGroups: [""]
     resources:
       - nodes
-      - nodes/proxy
       - pods
       - namespaces
     verbs: ["get", "list"]
