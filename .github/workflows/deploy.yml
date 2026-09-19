@@ -17,7 +17,7 @@ jobs:
       run: terraform fmt -check -recursive
       working-directory: infra
     - name: Terraform init (no backend)
-      run: terraform init -backend=false -input=false
+      run: terraform init -reconfigure -backend=false -input=false
       working-directory: infra
     - name: Terraform validate
       run: terraform validate
