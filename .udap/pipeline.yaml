@@ -28,11 +28,20 @@ stages:
           done
       - name: Python report builder syntax check
         run: python3 -m py_compile scripts/build_report.py
-      - name: Validate Kubernetes manifests
+      - name: Install kubeconform
         run: |
-          curl -sSLo /tmp/kubeconform.tar.gz https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          set -euo pipefail
+          # -f makes curl fail on an HTTP error instead of writing the error
+          # page to disk, where tar would later die on "not in gzip format".
+          # /releases/latest/download/ resolves to the current release, so a
+          # pinned tag that is later yanked cannot 404 this step.
+          curl -fsSL -o /tmp/kubeconform.tar.gz \
+            "https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz"
           tar -xzf /tmp/kubeconform.tar.gz -C /tmp
-          /tmp/kubeconform -strict -summary -skip CustomResourceDefinition k8s/
+          sudo install -m 0755 /tmp/kubeconform /usr/local/bin/kubeconform
+          kubeconform -v
+      - name: Validate Kubernetes manifests
+        run: kubeconform -strict -summary -skip CustomResourceDefinition k8s/
 
   - id: security
     kind: security
@@ -41,9 +50,16 @@ stages:
     steps:
       - name: Install Trivy
         run: |
-          curl -sSLo /tmp/trivy.tar.gz https://github.com/aquasecurity/trivy/releases/download/v0.56.2/trivy_0.56.2_Linux-64bit.tar.gz
-          tar -xzf /tmp/trivy.tar.gz -C /tmp
-          sudo mv /tmp/trivy /usr/local/bin/trivy
+          set -euo pipefail
+          # Install from the .deb package rather than a tarball: apt verifies
+          # the archive, so a truncated or HTML-bodied download fails loudly
+          # here instead of producing a corrupt binary.
+          # Version verified to exist before pinning; a yanked release is what
+          # broke the previous attempt.
+          TRIVY_VERSION="0.74.0"
+          curl -fsSL -o /tmp/trivy.deb \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.deb"
+          sudo dpkg -i /tmp/trivy.deb
           trivy --version
       - name: Scan Terraform for misconfiguration
         run: trivy config --severity HIGH,CRITICAL --exit-code 1 infra/
@@ -198,9 +214,11 @@ stages:
           version: "v1.33.0"
       - name: Install Trivy
         run: |
-          curl -sSLo /tmp/trivy.tar.gz https://github.com/aquasecurity/trivy/releases/download/v0.56.2/trivy_0.56.2_Linux-64bit.tar.gz
-          tar -xzf /tmp/trivy.tar.gz -C /tmp
-          sudo mv /tmp/trivy /usr/local/bin/trivy
+          set -euo pipefail
+          TRIVY_VERSION="0.74.0"
+          curl -fsSL -o /tmp/trivy.deb \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.deb"
+          sudo dpkg -i /tmp/trivy.deb
           trivy --version
       - name: Terraform init
         run: |
