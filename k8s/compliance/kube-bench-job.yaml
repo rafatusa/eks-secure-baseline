@@ -2,33 +2,51 @@
 # kube-bench running the CIS Amazon EKS Benchmark.
 #
 # Scope note: on EKS the control plane is managed by AWS and its component
-# flags are NOT inspectable from inside the cluster. The 'eks-stig-kubernetes'
-# and master-node sections of the generic CIS Kubernetes Benchmark therefore
-# do not apply. This job runs the 'eks-1.5.0' profile, which covers exactly
-# the controls a customer is responsible for: node configuration, kubelet
-# settings, RBAC, and cluster policies.
+# flags are NOT inspectable from inside the cluster. The master-node sections
+# of the generic CIS Kubernetes Benchmark therefore do not apply. This job
+# runs the 'eks-1.2.0' profile, which covers exactly the controls a customer
+# is responsible for: worker node configuration, kubelet settings, RBAC, and
+# cluster policies.
 #
 # ---------------------------------------------------------------------------
-# DO NOT ADD --targets  (this cost a failed compliance stage)
+# BENCHMARK NAME: pin it to one the IMAGE ACTUALLY SHIPS
 # ---------------------------------------------------------------------------
-# An earlier revision passed:
-#     --targets=node,policies,managedservices
-# and kube-bench refused to start with:
-#     error validating targets: No targets configured for eks-1.5.0
+# kube-bench v0.9.1 ships exactly these EKS benchmark definitions:
+#     eks-1.0.1   eks-1.1.0   eks-1.2.0
+# (verified against cfg/ in the v0.9.1 tag upstream). eks-1.2.0 is the newest
+# and is the one pinned below. Its cfg directory contains real control files:
+#     config.yaml controlplane.yaml managedservices.yaml master.yaml
+#     node.yaml policies.yaml
+# node.yaml declares `version: "eks-1.2.0"` / `type: "node"` with the scored
+# 3.1.x file-permission and 3.2.x kubelet checks this project exists to run.
 #
-# kube-bench validates every requested target against the target list the
-# SELECTED BENCHMARK declares in its own cfg, and those names differ between
-# benchmark versions. Naming them here duplicates a value that upstream owns,
-# so the manifest silently rots whenever the benchmark version is bumped.
+# TWO FAILED COMPLIANCE STAGES CAME FROM GETTING THIS WRONG — read before
+# changing the line:
 #
-# Omitting --targets makes kube-bench run the benchmark's OWN default target
-# set, which is always internally consistent with --benchmark. The failure
-# mode is also much better: an unsupported benchmark name fails immediately
-# and explicitly, rather than a valid benchmark failing on a stale target.
+#   1. An earlier revision named a benchmark that DOES NOT EXIST in this
+#      image ('eks-1.5.0'). kube-bench does not reject an unknown benchmark
+#      with a clear "unknown benchmark" error — it resolves it to an EMPTY
+#      target set and then fails target validation:
+#          error validating targets: No targets configured for eks-1.5.0
+#      That message points at --targets, which is NOT the cause. The cause is
+#      the benchmark name. Do not debug this by changing targets.
+#
+#   2. The same revision also passed:
+#          --targets=node,policies,managedservices
+#      Removing those changed nothing, precisely because the benchmark name
+#      was the real defect. --targets stays omitted anyway: each benchmark
+#      declares its own default target set, which is by construction
+#      consistent with --benchmark, whereas a hardcoded list here silently
+#      rots whenever the benchmark version is bumped.
+#
+# RULE: --benchmark must name a directory that exists in the pinned image's
+# cfg/. If the image tag below is bumped, re-verify the available benchmark
+# names for that tag before changing this value.
 #
 # Note the blast radius of the original bug: with backoffLimit: 0 the pod
 # failed in seconds, but the collecting script waited the full 600s timeout
-# before reporting it. See scripts/run-kube-bench.sh, which now fails fast.
+# before reporting it. See scripts/run-kube-bench.sh, which now fails fast
+# by racing the complete and failed conditions and printing pod logs first.
 # ---------------------------------------------------------------------------
 #
 # ---------------------------------------------------------------------------
@@ -41,7 +59,7 @@
 #
 # They are unavoidable for a NODE-LEVEL CIS SCANNER specifically:
 #   * hostPID  — kubelet process arguments are only visible in the host PID
-#                namespace; CIS 4.1.x/4.2.x check exactly those arguments.
+#                namespace; CIS 3.2.x checks exactly those arguments.
 #   * hostPath — the benchmark audits files on the node itself
 #                (/var/lib/kubelet/config.json, /etc/kubernetes/*, systemd
 #                unit files). They cannot be read from a container filesystem.
@@ -64,6 +82,13 @@
 #   * its ServiceAccount has read-only RBAC (get/list) and no write verbs;
 #   * it is a Job, not a long-running Deployment — it exits after scanning;
 #   * ttlSecondsAfterFinished removes it an hour later.
+#
+# LIFECYCLE OWNERSHIP: this Job is applied by scripts/run-kube-bench.sh ONLY,
+# which deletes any prior Job before applying. Kubernetes Jobs are immutable
+# (spec.template cannot change after creation), so a second caller that
+# applies without deleting will fail for the whole ttlSecondsAfterFinished
+# window after any spec edit. configure-cluster.sh deliberately does NOT
+# apply k8s/compliance/ for this reason.
 # ---------------------------------------------------------------------------
 apiVersion: batch/v1
 kind: Job
@@ -109,7 +134,9 @@ spec:
             - run
             # --targets is deliberately omitted: the benchmark declares its
             # own default targets. See the note at the top of this file.
-            - --benchmark=eks-1.5.0
+            # --benchmark MUST name a benchmark this image ships; v0.9.1
+            # provides eks-1.0.1, eks-1.1.0 and eks-1.2.0 only.
+            - --benchmark=eks-1.2.0
             - --json
 
           securityContext:
