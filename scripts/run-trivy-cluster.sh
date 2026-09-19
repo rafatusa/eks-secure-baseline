@@ -22,7 +22,29 @@ if [ -n "${ROLE_ARN}" ]; then
     --overwrite
 fi
 
-echo "==> Running Trivy Kubernetes misconfiguration scan"
+# ---------------------------------------------------------------------------
+# DO NOT PASS A POSITIONAL ARGUMENT HERE (this cost a failed compliance stage)
+# ---------------------------------------------------------------------------
+# An earlier revision ended this command with a bare `cluster`, intending it
+# to mean "scan the whole cluster". It does not. In `trivy kubernetes` that
+# positional is a KUBECONFIG CONTEXT NAME, so Trivy went looking for a
+# context literally called "cluster" and died with:
+#
+#     FATAL  failed getting k8s cluster: context "cluster" does not exist
+#
+# `aws eks update-kubeconfig` names its context after the cluster ARN
+# (arn:aws:eks:<region>:<account>:cluster/<name>), so that context never
+# existed. With no positional, Trivy scans the kubeconfig's CURRENT context,
+# which scripts/ci-api-access.sh has already selected. That is also why this
+# script must NOT run `aws eks update-kubeconfig` itself — the access wrapper
+# owns kubeconfig setup for the whole stage.
+#
+# Deliberately not hardcoding a context name: it would re-break the moment
+# the cluster or region changes.
+# ---------------------------------------------------------------------------
+echo "==> Running Trivy Kubernetes misconfiguration scan (current context)"
+kubectl config current-context
+
 # --report all gives per-resource detail rather than a bare summary.
 # Scoped to cluster-wide resources; this does NOT pull every image, which
 # would take far longer than the stage timeout allows.
@@ -32,8 +54,7 @@ trivy kubernetes \
   --severity HIGH,CRITICAL \
   --format json \
   --output "${REPORT_DIR}/trivy-cluster.json" \
-  --timeout 15m \
-  cluster || {
+  --timeout 15m || {
   echo "!! Trivy cluster scan failed" >&2
   exit 1
 }

@@ -9,7 +9,31 @@
 # settings, RBAC, and cluster policies.
 #
 # ---------------------------------------------------------------------------
-# WHY THIS MANIFEST HAS SUPPRESSED TRIVY FINDINGS (.trivyignore)
+# DO NOT ADD --targets  (this cost a failed compliance stage)
+# ---------------------------------------------------------------------------
+# An earlier revision passed:
+#     --targets=node,policies,managedservices
+# and kube-bench refused to start with:
+#     error validating targets: No targets configured for eks-1.5.0
+#
+# kube-bench validates every requested target against the target list the
+# SELECTED BENCHMARK declares in its own cfg, and those names differ between
+# benchmark versions. Naming them here duplicates a value that upstream owns,
+# so the manifest silently rots whenever the benchmark version is bumped.
+#
+# Omitting --targets makes kube-bench run the benchmark's OWN default target
+# set, which is always internally consistent with --benchmark. The failure
+# mode is also much better: an unsupported benchmark name fails immediately
+# and explicitly, rather than a valid benchmark failing on a stale target.
+#
+# Note the blast radius of the original bug: with backoffLimit: 0 the pod
+# failed in seconds, but the collecting script waited the full 600s timeout
+# before reporting it. See scripts/run-kube-bench.sh, which now fails fast.
+# ---------------------------------------------------------------------------
+#
+# ---------------------------------------------------------------------------
+# WHY THIS MANIFEST HAS SUPPRESSED TRIVY FINDINGS
+# (.trivyignore-kube-bench, applied ONLY when scanning k8s/compliance/)
 # ---------------------------------------------------------------------------
 # Trivy flags this Job for hostPID, hostPath volumes and runAsUser: 0
 # (KSV-0010, KSV-0012, KSV-0023, KSV-0105, KSV-0118). Those findings are
@@ -31,7 +55,8 @@
 #   privileged: false, allowPrivilegeEscalation: false,
 #   readOnlyRootFilesystem: true, ALL capabilities dropped,
 #   every hostPath mount readOnly: true, seccompProfile: RuntimeDefault,
-#   automountServiceAccountToken scoped, RBAC limited to get/list.
+#   automountServiceAccountToken scoped, RBAC limited to get/list
+#   (and NOT nodes/proxy — see k8s/hardening/rbac.yaml).
 #
 # Blast radius is contained by isolation, not by trust:
 #   * runs in its own 'kube-bench' namespace labelled PSA 'privileged',
@@ -82,7 +107,8 @@ spec:
             - kube-bench
           args:
             - run
-            - --targets=node,policies,managedservices
+            # --targets is deliberately omitted: the benchmark declares its
+            # own default targets. See the note at the top of this file.
             - --benchmark=eks-1.5.0
             - --json
 
