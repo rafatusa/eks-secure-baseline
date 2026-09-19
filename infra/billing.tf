@@ -15,7 +15,12 @@ provider "aws" {
 }
 
 locals {
-  billing_alarm_enabled = var.billing_alarm_email != ""
+  # CI secrets cannot hold an empty string, so "none" is the explicit
+  # disabled sentinel alongside a genuinely empty value.
+  billing_alarm_enabled = (
+    var.billing_alarm_email != "" &&
+    lower(var.billing_alarm_email) != "none"
+  )
 }
 
 resource "aws_sns_topic" "billing" {

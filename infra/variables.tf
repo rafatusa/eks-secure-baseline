@@ -85,10 +85,21 @@ variable "node_disk_size" {
 variable "billing_alarm_email" {
   description = <<-EOT
     Email address that receives the CloudWatch billing alarm notification.
-    Leave empty to skip creating the alarm and its SNS subscription.
+    Set to an empty string or the literal "none" to skip creating the alarm
+    and its SNS subscription. ("none" exists because CI secrets cannot hold
+    an empty value.)
   EOT
   type        = string
   default     = ""
+
+  validation {
+    condition = (
+      var.billing_alarm_email == "" ||
+      lower(var.billing_alarm_email) == "none" ||
+      can(regex("^[^@[:space:]]+@[^@[:space:]]+\\.[^@[:space:]]+$", var.billing_alarm_email))
+    )
+    error_message = "billing_alarm_email must be a valid email address, an empty string, or \"none\"."
+  }
 }
 
 variable "billing_alarm_threshold_usd" {
