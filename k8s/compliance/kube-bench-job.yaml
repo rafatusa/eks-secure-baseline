@@ -7,6 +7,39 @@
 # do not apply. This job runs the 'eks-1.5.0' profile, which covers exactly
 # the controls a customer is responsible for: node configuration, kubelet
 # settings, RBAC, and cluster policies.
+#
+# ---------------------------------------------------------------------------
+# WHY THIS MANIFEST HAS SUPPRESSED TRIVY FINDINGS (.trivyignore)
+# ---------------------------------------------------------------------------
+# Trivy flags this Job for hostPID, hostPath volumes and runAsUser: 0
+# (KSV-0010, KSV-0012, KSV-0023, KSV-0105, KSV-0118). Those findings are
+# CORRECT for an ordinary workload and are deliberately NOT waived for one.
+#
+# They are unavoidable for a NODE-LEVEL CIS SCANNER specifically:
+#   * hostPID  — kubelet process arguments are only visible in the host PID
+#                namespace; CIS 4.1.x/4.2.x check exactly those arguments.
+#   * hostPath — the benchmark audits files on the node itself
+#                (/var/lib/kubelet/config.json, /etc/kubernetes/*, systemd
+#                unit files). They cannot be read from a container filesystem.
+#   * runAsUser: 0 — those files are root-owned with 0600/0644 permissions.
+#
+# A kube-bench pod that satisfied these checks could not perform the scan:
+# it would report every node control as unreadable. The privileges are the
+# scanner's function, not an oversight.
+#
+# The privileges are minimised to exactly what the scan needs:
+#   privileged: false, allowPrivilegeEscalation: false,
+#   readOnlyRootFilesystem: true, ALL capabilities dropped,
+#   every hostPath mount readOnly: true, seccompProfile: RuntimeDefault,
+#   automountServiceAccountToken scoped, RBAC limited to get/list.
+#
+# Blast radius is contained by isolation, not by trust:
+#   * runs in its own 'kube-bench' namespace labelled PSA 'privileged',
+#     while workload namespaces stay PSA 'restricted';
+#   * its ServiceAccount has read-only RBAC (get/list) and no write verbs;
+#   * it is a Job, not a long-running Deployment — it exits after scanning;
+#   * ttlSecondsAfterFinished removes it an hour later.
+# ---------------------------------------------------------------------------
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -33,6 +66,13 @@ spec:
       # runs in its own 'privileged' PSA namespace rather than 'restricted'.
       hostPID: true
 
+      # Pod-level security context. seccompProfile is set here so it applies
+      # to every container in the pod. This one IS remediable without
+      # breaking the scan, so it is fixed rather than suppressed.
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+
       containers:
         - name: kube-bench
           image: docker.io/aquasec/kube-bench:v0.9.1
@@ -47,11 +87,14 @@ spec:
             - --json
 
           securityContext:
-            # kube-bench reads root-owned kubelet config files.
+            # kube-bench reads root-owned kubelet config files, so UID 0 is
+            # required. Everything that can be locked down, is.
             runAsUser: 0
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             privileged: false
+            seccompProfile:
+              type: RuntimeDefault
             capabilities:
               drop:
                 - ALL

@@ -61,21 +61,42 @@ stages:
             "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.deb"
           sudo dpkg -i /tmp/trivy.deb
           trivy --version
+
       - name: Show all findings (informational, does not gate)
         run: |
-          # Printed BEFORE the gating scans so a failure is diagnosable from
-          # this log alone. --exit-code 0 here: this step reports, it does
-          # not decide. The gating happens in the two steps below.
-          echo "::group::Terraform findings (all severities)"
-          trivy config --ignorefile .trivyignore --exit-code 0 infra/
+          # Printed BEFORE the gating scans so any failure below is
+          # diagnosable from this log alone, with NO ignore files applied —
+          # this is the unfiltered truth about the repository.
+          # --exit-code 0: this step reports, it never decides.
+          echo "::group::Terraform — all findings, no suppressions"
+          trivy config --exit-code 0 infra/
           echo "::endgroup::"
-          echo "::group::Kubernetes findings (all severities)"
-          trivy config --ignorefile .trivyignore --exit-code 0 k8s/
+          echo "::group::Kubernetes — all findings, no suppressions"
+          trivy config --exit-code 0 k8s/
           echo "::endgroup::"
+
+      # ---------------------------------------------------------------
+      # GATING SCANS
+      #
+      # Split by scan target so a suppression can NEVER leak outside the
+      # directory it was reviewed for. Scoping is enforced by the scan
+      # invocation (which ignore file is passed), not by per-entry path
+      # syntax inside the ignore file.
+      #
+      #   infra/           -> .trivyignore             (AWS-0104 only)
+      #   k8s/hardening/   -> NO ignore file           (fully gated)
+      #   k8s/compliance/  -> .trivyignore-kube-bench  (scanner Job only)
+      #
+      # All three keep --severity HIGH,CRITICAL --exit-code 1.
+      # ---------------------------------------------------------------
       - name: Scan Terraform for misconfiguration
         run: trivy config --ignorefile .trivyignore --severity HIGH,CRITICAL --exit-code 1 infra/
-      - name: Scan Kubernetes manifests for misconfiguration
-        run: trivy config --ignorefile .trivyignore --severity HIGH,CRITICAL --exit-code 1 k8s/
+
+      - name: Scan Kubernetes hardening manifests (no suppressions)
+        run: trivy config --severity HIGH,CRITICAL --exit-code 1 k8s/hardening/
+
+      - name: Scan kube-bench scanner Job (scanner-specific suppressions)
+        run: trivy config --ignorefile .trivyignore-kube-bench --severity HIGH,CRITICAL --exit-code 1 k8s/compliance/
 
   - id: provision
     kind: provision

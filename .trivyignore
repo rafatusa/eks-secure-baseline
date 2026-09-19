@@ -1,20 +1,27 @@
-# Trivy suppressions for eks-secure-baseline
+# Trivy suppressions for eks-secure-baseline — TERRAFORM (infra/) ONLY.
 #
-# POLICY: this file is the ONLY place a finding may be suppressed, every
-# entry carries a written justification, and suppressions are per-CHECK-ID.
-# The scanner itself is never weakened: `trivy config` still runs with
-# --severity HIGH,CRITICAL --exit-code 1, so any finding not listed here
-# fails the pipeline. Do not add a blanket severity filter, do not remove
-# --exit-code, and do not add an entry without a justification.
+# POLICY
+# ------
+# This file is passed explicitly with --ignorefile when scanning infra/.
+# The Kubernetes scans use their own ignore files so that a suppression can
+# never leak across scan targets:
+#
+#   infra/              -> .trivyignore                (this file)
+#   k8s/hardening/      -> NO ignore file — fully gated, no exceptions
+#   k8s/compliance/     -> .trivyignore-kube-bench     (scanner Job only)
+#
+# The scanner is NEVER weakened: every scan runs
+# --severity HIGH,CRITICAL --exit-code 1. Do not add a blanket severity
+# filter, do not remove --exit-code, and do not add an entry here without a
+# written justification.
 #
 # Reviewed: 2026-09-19
 
-# -----------------------------------------------------------------------
+# -------------------------------------------------------------------------
 # AWS-0104 — "Security group rule allows egress to multiple public internet
 #             addresses" (aws_vpc_security_group_egress_rule.cluster_egress)
-# -----------------------------------------------------------------------
-# ACCEPTED RISK, not a false positive in general — but not remediable for an
-# EKS control plane security group.
+# -------------------------------------------------------------------------
+# ACCEPTED RISK — not remediable for an EKS control plane security group.
 #
 # The EKS control plane's cross-account ENIs must reach worker node kubelets
 # on ephemeral ports and regional AWS service endpoints (STS, ECR, CloudWatch
@@ -24,15 +31,11 @@
 # Narrowing it breaks node registration and add-on installation — failures
 # that surface only after a full ~15 minute apply.
 #
-# Compensating controls that make this acceptable:
-#   * The SG is attached ONLY to AWS-managed control plane ENIs. No workload
-#     traffic transits it.
+# Compensating controls:
+#   * Attached ONLY to AWS-managed control plane ENIs; no workload traffic.
 #   * The SG has NO ingress rules at all: it is egress-only.
 #   * Workload egress is separately default-denied by the NetworkPolicies in
 #     k8s/hardening/network-policies.yaml, which also block the instance
 #     metadata endpoint (169.254.169.254).
 #   * Nodes have no public IPs and sit in private subnets behind a NAT gateway.
-#
-# Scope: this suppresses ONE check id. Every other HIGH/CRITICAL finding in
-# infra/ and k8s/ still fails the build.
 AWS-0104

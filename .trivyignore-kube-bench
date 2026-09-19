@@ -1,0 +1,77 @@
+# Trivy suppressions for the kube-bench scanner Job ONLY.
+#
+# SCOPING BY SCAN TARGET, NOT BY SYNTAX
+# -------------------------------------
+# This file is passed with --ignorefile ONLY when scanning k8s/compliance/,
+# which contains nothing but the kube-bench Job. k8s/hardening/ — and any
+# future application workload — is scanned with NO ignore file at all, so
+# these checks still fail the build everywhere else. The isolation comes
+# from the scan invocation, which is unambiguous, rather than from per-entry
+# path syntax.
+#
+# The scanner is NEVER weakened: the scan still runs
+# --severity HIGH,CRITICAL --exit-code 1.
+#
+# Reviewed: 2026-09-19
+
+# ===========================================================================
+# WHY A CIS NODE SCANNER CANNOT SATISFY POD SECURITY CHECKS
+# ===========================================================================
+# kube-bench audits NODE-level CIS controls: kubelet process arguments,
+# kubelet config files, systemd units and certificate permissions on the
+# host. Performing that audit requires host access:
+#
+#   hostPID        -> kubelet process arguments are only visible in the host
+#                     PID namespace; CIS 4.1.x / 4.2.x check exactly those
+#                     arguments.
+#   hostPath       -> the benchmark reads files ON THE NODE
+#                     (/var/lib/kubelet/config.json, /etc/kubernetes/*,
+#                     systemd unit files). They do not exist in a container
+#                     filesystem.
+#   runAsUser: 0   -> those files are root-owned with 0600/0644 modes.
+#
+# A kube-bench pod that PASSED these checks could not perform the scan at
+# all — it would report every node control as unreadable. These privileges
+# are the scanner's function, not an oversight.
+#
+# MINIMISED, not waived. The Job sets:
+#   privileged: false, allowPrivilegeEscalation: false,
+#   readOnlyRootFilesystem: true, capabilities drop ALL,
+#   seccompProfile: RuntimeDefault (pod + container),
+#   every hostPath mount readOnly: true.
+#
+# BLAST RADIUS CONTAINED BY ISOLATION:
+#   * runs in its own 'kube-bench' namespace labelled PSA 'privileged',
+#     while every workload namespace stays PSA 'restricted';
+#   * its ServiceAccount has read-only RBAC (get/list, no write verbs);
+#   * it is a Job, not a Deployment — it exits when the scan completes;
+#   * ttlSecondsAfterFinished removes it an hour later.
+#
+# FIXED RATHER THAN SUPPRESSED:
+#   KSV-0030 (seccompProfile) — now RuntimeDefault at pod and container
+#   level. It cost the scan nothing, so it was corrected, not ignored.
+# ===========================================================================
+
+# KSV-0010 (HIGH) — hostPID: true.
+# Required to read kubelet process arguments.
+KSV-0010
+
+# KSV-0118 (HIGH) — "default security context allows root privileges".
+# Triggered by runAsUser: 0, required to read root-owned kubelet config.
+# The context is NOT actually default: privileged=false,
+# allowPrivilegeEscalation=false, readOnlyRootFilesystem=true, all
+# capabilities dropped, seccompProfile=RuntimeDefault.
+KSV-0118
+
+# KSV-0012 (MEDIUM) — runAsNonRoot not set to true.
+# Same cause as KSV-0118: the benchmark reads root-owned files.
+KSV-0012
+
+# KSV-0105 — runAsUser should be greater than 0.
+# Same cause as KSV-0118.
+KSV-0105
+
+# KSV-0023 (MEDIUM) — hostPath volumes forbidden.
+# The benchmark audits files on the node itself. All three mounts are
+# readOnly: true, so the scanner cannot modify what it audits.
+KSV-0023
