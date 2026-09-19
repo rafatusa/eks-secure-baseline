@@ -1,0 +1,52 @@
+---
+# Compliance namespace, governed by Pod Security Admission.
+#
+# 'restricted' is the strictest built-in Pod Security Standard: it forbids
+# privilege escalation, host namespaces, hostPath volumes and running as root.
+# Enforcement is set on this namespace so scanner workloads that violate it
+# are REJECTED rather than silently admitted.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: compliance
+  labels:
+    name: compliance
+    # Pod Security Admission — enforce blocks, audit and warn record.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+---
+# kube-bench legitimately needs host access to read kubelet configuration
+# files, so it cannot run under 'restricted'. It is isolated in its own
+# namespace with 'privileged' enforcement, and NOTHING else is permitted to
+# run here. The scan job is the only workload, it is short-lived, and its
+# RBAC is read-only.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-bench
+  labels:
+    name: kube-bench
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: baseline
+    pod-security.kubernetes.io/warn-version: latest
+---
+# The default namespace ships with no Pod Security Admission labels at all,
+# which means anything can run there. Applying 'restricted' closes that gap —
+# a standard CIS Kubernetes Benchmark finding.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: default
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest

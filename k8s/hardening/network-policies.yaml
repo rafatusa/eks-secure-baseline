@@ -1,0 +1,100 @@
+---
+# Default-deny all ingress and egress in the default namespace.
+# Kubernetes networking is permissive by default: any pod can reach any other
+# pod and any external address. This is the single most impactful in-cluster
+# hardening control.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: default
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# DNS must be explicitly re-allowed after a default-deny egress policy,
+# otherwise every pod fails to resolve names and the failure looks like an
+# application bug rather than a policy one.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: default
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: compliance
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# The compliance scanner needs DNS plus HTTPS egress: it calls the Kubernetes
+# API and AWS APIs. Ingress stays fully denied — nothing needs to reach it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-scanner-egress
+  namespace: compliance
+spec:
+  podSelector:
+    matchLabels:
+      app: compliance-scanner
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              # Block the link-local range that hosts the instance metadata
+              # service. Even with IMDSv2 enforced, pods have no business
+              # reaching 169.254.169.254.
+              - 169.254.169.254/32
+      ports:
+        - protocol: TCP
+          port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: kube-bench
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress

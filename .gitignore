@@ -1,0 +1,40 @@
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Never commit variable files — they routinely contain account-specific
+# values and are how secrets leak into git history.
+*.tfvars
+*.tfvars.json
+
+# Generated compliance reports (published as CI artifacts, not committed)
+reports/
+
+# Kubeconfig
+kubeconfig
+kubeconfig_*
+.kube/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

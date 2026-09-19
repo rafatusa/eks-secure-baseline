@@ -1,0 +1,98 @@
+---
+# kube-bench running the CIS Amazon EKS Benchmark.
+#
+# Scope note: on EKS the control plane is managed by AWS and its component
+# flags are NOT inspectable from inside the cluster. The 'eks-stig-kubernetes'
+# and master-node sections of the generic CIS Kubernetes Benchmark therefore
+# do not apply. This job runs the 'eks-1.5.0' profile, which covers exactly
+# the controls a customer is responsible for: node configuration, kubelet
+# settings, RBAC, and cluster policies.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kube-bench
+  namespace: kube-bench
+  labels:
+    app: kube-bench
+spec:
+  # Do not retry: a failed scan should surface, not be masked by a retry that
+  # happens to land on a different node.
+  backoffLimit: 0
+  # Clean up 1 hour after completion so repeated runs do not accumulate.
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: kube-bench
+    spec:
+      serviceAccountName: kube-bench
+      restartPolicy: Never
+
+      # hostPID is required: kube-bench inspects kubelet process arguments,
+      # which are only visible in the host PID namespace. This is why the job
+      # runs in its own 'privileged' PSA namespace rather than 'restricted'.
+      hostPID: true
+
+      containers:
+        - name: kube-bench
+          image: docker.io/aquasec/kube-bench:v0.9.1
+          imagePullPolicy: IfNotPresent
+
+          command:
+            - kube-bench
+          args:
+            - run
+            - --targets=node,policies,managedservices
+            - --benchmark=eks-1.5.0
+            - --json
+
+          securityContext:
+            # kube-bench reads root-owned kubelet config files.
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities:
+              drop:
+                - ALL
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+          volumeMounts:
+            # Every host mount is READ-ONLY: the scanner must never be able to
+            # modify the configuration it is auditing.
+            - name: var-lib-kubelet
+              mountPath: /var/lib/kubelet
+              readOnly: true
+            - name: etc-systemd
+              mountPath: /etc/systemd
+              readOnly: true
+            - name: etc-kubernetes
+              mountPath: /etc/kubernetes
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: var-lib-kubelet
+          hostPath:
+            path: /var/lib/kubelet
+            type: Directory
+        - name: etc-systemd
+          hostPath:
+            path: /etc/systemd
+            type: Directory
+        - name: etc-kubernetes
+          hostPath:
+            path: /etc/kubernetes
+            type: DirectoryOrCreate
+        # Writable scratch space, needed because the root filesystem is
+        # mounted read-only.
+        - name: tmp
+          emptyDir: {}
