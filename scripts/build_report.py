@@ -10,6 +10,25 @@ Scope statement (deliberately reproduced in every report):
     additionally has no published DISA SCAP content. The controls below are
     therefore the customer-responsibility subset that can be genuinely
     evaluated on this platform.
+
+PARSING NOTE — null vs missing (this cost a failed compliance stage)
+--------------------------------------------------------------------
+kube-bench emits `"tests": null` for controls it did not evaluate. On EKS
+that is GUARANTEED, not exceptional: the eks-1.2.0 benchmark ships
+controlplane.yaml and master.yaml sections whose components are managed by
+AWS and cannot be assessed from inside the cluster, so they come back with a
+null test list.
+
+`dict.get("tests", [])` does NOT protect against this. The default is only
+returned when the key is ABSENT; here the key is PRESENT with value None, so
+`.get` returns None and iteration raises:
+
+    TypeError: 'NoneType' object is not iterable
+
+Every nested traversal below therefore uses `(x.get(key) or [])`, which
+collapses both missing AND null to an empty list. The same applies to Trivy's
+`Results` / `Misconfigurations`, which are null for resources that produced
+no findings. Keep this idiom if you extend the parser.
 """
 
 from __future__ import annotations
@@ -47,19 +66,33 @@ def load_json(path: str | None) -> Any:
         return None
 
 
-def parse_kube_bench(data: Any) -> tuple[list[dict], Counter]:
-    """Flatten kube-bench JSON into a list of checks plus status totals."""
+def parse_kube_bench(data: Any) -> tuple[list[dict], Counter, list[str]]:
+    """Flatten kube-bench JSON into a list of checks, status totals, and the
+    names of controls that reported no assessable tests.
+
+    Returns (checks, totals, unassessed_controls).
+    """
     checks: list[dict] = []
     totals: Counter = Counter()
+    unassessed: list[str] = []
 
     if not data:
-        return checks, totals
+        return checks, totals, unassessed
 
-    for control in data.get("Controls", []):
-        benchmark = control.get("text", control.get("id", "unknown"))
-        for group in control.get("tests", []):
-            section = group.get("desc", group.get("section", ""))
-            for check in group.get("results", []):
+    # `or []` (not `.get(..., [])`): kube-bench uses null, not a missing key.
+    for control in data.get("Controls") or []:
+        benchmark = control.get("text") or control.get("id") or "unknown"
+
+        groups = control.get("tests") or []
+        if not groups:
+            # Expected on EKS for control-plane / master sections: AWS manages
+            # those components, so they are inherited rather than assessable.
+            unassessed.append(str(benchmark))
+            continue
+
+        for group in groups:
+            section = group.get("desc") or group.get("section") or ""
+            for check in group.get("results") or []:
                 state = (check.get("test_desc") or "").strip()
                 status = (check.get("status") or "INFO").upper()
                 totals[status] += 1
@@ -67,14 +100,14 @@ def parse_kube_bench(data: Any) -> tuple[list[dict], Counter]:
                     {
                         "benchmark": benchmark,
                         "section": section,
-                        "id": check.get("test_number", ""),
+                        "id": check.get("test_number") or "",
                         "description": state,
                         "status": status,
                         "remediation": (check.get("remediation") or "").strip(),
                     }
                 )
 
-    return checks, totals
+    return checks, totals, unassessed
 
 
 def parse_trivy(data: Any) -> tuple[list[dict], Counter]:
@@ -85,16 +118,19 @@ def parse_trivy(data: Any) -> tuple[list[dict], Counter]:
     if not data:
         return findings, totals
 
-    resources = data.get("Resources") or data.get("Misconfigurations") or []
     if isinstance(data, list):
         resources = data
+    else:
+        resources = data.get("Resources") or data.get("Misconfigurations") or []
 
     for resource in resources:
-        kind = resource.get("Kind", "")
-        name = resource.get("Name", "")
-        namespace = resource.get("Namespace", "")
-        for result in resource.get("Results", []) or []:
-            for misconf in result.get("Misconfigurations", []) or []:
+        if not isinstance(resource, dict):
+            continue
+        kind = resource.get("Kind") or ""
+        name = resource.get("Name") or ""
+        namespace = resource.get("Namespace") or ""
+        for result in resource.get("Results") or []:
+            for misconf in result.get("Misconfigurations") or []:
                 severity = (misconf.get("Severity") or "UNKNOWN").upper()
                 totals[severity] += 1
                 findings.append(
@@ -102,8 +138,8 @@ def parse_trivy(data: Any) -> tuple[list[dict], Counter]:
                         "kind": kind,
                         "name": name,
                         "namespace": namespace,
-                        "id": misconf.get("ID", ""),
-                        "title": misconf.get("Title", ""),
+                        "id": misconf.get("ID") or "",
+                        "title": misconf.get("Title") or "",
                         "severity": severity,
                         "resolution": (misconf.get("Resolution") or "").strip(),
                     }
@@ -116,6 +152,7 @@ def build_summary(
     bench_totals: Counter,
     trivy_totals: Counter,
     bench_checks: list[dict],
+    unassessed: list[str],
 ) -> str:
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     total_checks = sum(bench_totals.values())
@@ -159,6 +196,20 @@ def build_summary(
         f"  Pass rate    : {score:.1f}%",
         "",
     ]
+
+    if unassessed:
+        lines += [
+            "NOT ASSESSABLE (AWS-inherited)",
+            "-" * 72,
+        ]
+        for control in unassessed:
+            lines.append(f"  - {control}")
+        lines += [
+            "  These sections are managed by AWS on EKS and cannot be",
+            "  evaluated from inside the cluster. They are inherited",
+            "  controls, not failures.",
+            "",
+        ]
 
     if failed:
         lines.append("FAILED CHECKS")
@@ -209,6 +260,7 @@ def build_html(
     bench_totals: Counter,
     trivy_findings: list[dict],
     trivy_totals: Counter,
+    unassessed: list[str],
 ) -> str:
     generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     total_checks = sum(bench_totals.values())
@@ -263,6 +315,17 @@ def build_html(
             + "</tbody></table>"
         )
     )
+
+    inherited_section = ""
+    if unassessed:
+        items = "".join(f"<li>{esc(c)}</li>" for c in unassessed)
+        inherited_section = (
+            "<h2>Not assessable (AWS-inherited)</h2>"
+            "<p class='muted'>These benchmark sections cover components that AWS "
+            "manages on EKS. They cannot be evaluated from inside the cluster and "
+            "are inherited controls, not failures.</p>"
+            f"<ul class='muted'>{items}</ul>"
+        )
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -330,6 +393,8 @@ def build_html(
       '<tr><td colspan="4">No kube-bench results.</td></tr>'}</tbody>
   </table>
 
+  {inherited_section}
+
   <h2>Trivy cluster findings</h2>
   {trivy_section}
 </div>
@@ -347,22 +412,44 @@ def main() -> int:
     parser.add_argument("--json-out", required=True)
     args = parser.parse_args()
 
-    bench_checks, bench_totals = parse_kube_bench(load_json(args.kube_bench))
+    bench_checks, bench_totals, unassessed = parse_kube_bench(
+        load_json(args.kube_bench)
+    )
     trivy_findings, trivy_totals = parse_trivy(load_json(args.trivy))
 
-    summary = build_summary(bench_totals, trivy_totals, bench_checks)
+    # A report with zero evaluated controls is not a compliance report. This
+    # is a genuine tooling failure (scanner produced no assessable output),
+    # distinct from a report that contains FAIL findings — findings are the
+    # report's CONTENT and must never fail the stage.
+    if not bench_checks:
+        print(
+            "ERROR: kube-bench produced no assessable controls. "
+            "Check the --benchmark value against the benchmarks the image "
+            "ships, and review the kube-bench pod logs above."
+        )
+        return 1
+
+    summary = build_summary(bench_totals, trivy_totals, bench_checks, unassessed)
     with open(args.summary_out, "w", encoding="utf-8") as handle:
         handle.write(summary + "\n")
 
     with open(args.html_out, "w", encoding="utf-8") as handle:
-        handle.write(build_html(bench_checks, bench_totals,
-                                trivy_findings, trivy_totals))
+        handle.write(
+            build_html(
+                bench_checks,
+                bench_totals,
+                trivy_findings,
+                trivy_totals,
+                unassessed,
+            )
+        )
 
     machine_readable = {
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "scope": SCOPE_NOTE,
         "kube_bench": dict(bench_totals),
         "trivy": dict(trivy_totals),
+        "unassessed_controls": unassessed,
         "failed_checks": [c for c in bench_checks if c["status"] == "FAIL"],
     }
     with open(args.json_out, "w", encoding="utf-8") as handle:
