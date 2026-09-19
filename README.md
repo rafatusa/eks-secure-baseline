@@ -66,7 +66,8 @@ nodes ~$60, NAT gateway ~$33, KMS and CloudWatch a few dollars.
 - Kubernetes secrets encrypted at rest with a **customer-managed KMS key**
   (rotation enabled), not merely base64-encoded in etcd.
 - **No SSH.** No port 22 is opened anywhere; node access is via AWS SSM.
-- API endpoint restricted by CIDR (see `api_allowed_cidr`).
+- **API endpoint locked to a single administrative host** (`/32`), with
+  private endpoint access enabled — see below.
 
 **In-cluster**
 - **Pod Security Admission** in `restricted` mode on `default` and
@@ -78,6 +79,49 @@ nodes ~$60, NAT gateway ~$33, KMS and CloudWatch a few dollars.
   No `cluster-admin` binding exists for any workload service account.
 - **ResourceQuota + LimitRange** on every non-system namespace.
 - **IRSA** for AWS access — no node-wide credentials shared with pods.
+
+---
+
+## API server network access
+
+The API server endpoint is **not** open to the internet. `public_access_cidrs`
+is set to one administrative host, and `variables.tf` enforces this with
+validation blocks that reject `0.0.0.0/0` and anything broader than `/24`. A
+misconfigured deploy fails at `terraform plan` rather than silently exposing
+the control plane.
+
+### How CI reaches a locked-down endpoint
+
+GitHub-hosted runners have ephemeral public IPs from large, rotating ranges.
+Permanently allowlisting GitHub's published ranges would admit *every* GitHub
+Actions runner on the platform — much weaker than it looks.
+
+Instead, each stage that needs `kubectl` wraps its work in
+`scripts/ci-api-access.sh`, which:
+
+1. resolves the runner's own public IP,
+2. adds it to the allowlist as a `/32` alongside the administrative host,
+3. runs the stage's work,
+4. **always** restores the allowlist to the administrative host alone.
+
+Step 4 is a `trap ... EXIT INT TERM` inside a single step rather than a
+separate cleanup step, so it fires on success, on failure, on `set -e` abort,
+and on job cancellation or timeout. The reset is absolute (not a removal of
+one entry), which makes it self-healing: if a run ever dies without the trap
+firing, the next run's reset restores the intended state.
+
+Steady-state exposure is therefore one host; the widened window is bounded by
+the job runtime. The `verify` stage asserts this with
+`scripts/verify-api-restriction.sh`, which fails the deploy if the allowlist
+ever contains an open or overly broad range.
+
+**If your IP changes**, update the `API_ALLOWED_CIDR` repository secret and
+redeploy. Until then `kubectl` from your workstation will time out — CI is
+unaffected, because it allowlists itself.
+
+**Optional hardening (Tier 2):** set `endpoint_public_access = false` for a
+fully private endpoint. This is genuinely stronger, but CI then requires a
+self-hosted runner or VPN inside the VPC. Not enabled by default.
 
 ---
 
@@ -102,12 +146,18 @@ is visible without downloading anything.
 
 Some findings are expected and are **not** bugs:
 
-- **Open API endpoint** — if `api_allowed_cidr` is left at `0.0.0.0/0`,
-  kube-bench flags it. That is a true finding. Set the variable to your IP
-  as `x.x.x.x/32` to clear it.
 - **Control-plane checks reported as INFO/WARN** — EKS manages those
   components; the controls are inherited from AWS and cannot be evaluated
   from inside the cluster.
+- **Unrestricted egress on the cluster security group** (Trivy `AWS-0104`) —
+  a documented exception in `infra/eks.tf`. The EKS control plane must reach
+  node kubelets and regional AWS service endpoints; AWS's own security group
+  requirements specify open egress here. It is suppressed at that single
+  rule, with justification and compensating controls recorded inline — not
+  by filtering severities or dropping the scanner's `--exit-code`.
+
+Every other finding fails the pipeline. The scanner is not weakened to
+produce a green run; that would defeat the purpose of the project.
 
 ---
 
@@ -117,11 +167,11 @@ Set via `TF_VAR_*` in the pipeline, or as repository secrets:
 
 | Variable | Default | Notes |
 |---|---|---|
-| `api_allowed_cidr` | `0.0.0.0/0` | **Set to `x.x.x.x/32` to harden** |
+| `api_allowed_cidr` | `203.0.113.1/32` | Non-routable placeholder (RFC 5737). Supplied at deploy time from the `API_ALLOWED_CIDR` secret. Open and broad CIDRs are rejected by validation. |
 | `k8s_version` | `1.33` | Must be in AWS standard support |
 | `node_instance_type` | `t3.medium` | |
 | `node_desired_size` | `2` | Minimum 2 (two AZs) |
-| `billing_alarm_email` | *(empty)* | Empty disables the alarm |
+| `billing_alarm_email` | *(empty)* | Empty or `"none"` disables the alarm |
 | `billing_alarm_threshold_usd` | `200` | |
 
 ---
@@ -134,7 +184,7 @@ lint → security → provision → configure → verify → compliance
 
 | Stage | Does |
 |---|---|
-| `lint` | `terraform fmt/validate`, `kubeconform` on manifests |
+| `lint` | `terraform fmt/validate`, `bash -n`, `py_compile`, `kubeconform` |
 | `security` | Trivy misconfiguration scan of `infra/` and `k8s/` |
 | `provision` | `terraform apply` — VPC, EKS, nodes, KMS, alarm |
 | `configure` | Applies hardening baseline and scanner resources |
@@ -158,6 +208,10 @@ behind, where they keep billing (~$16/month each) and hold ENIs that make
 `DeleteVpc` fail with `DependencyViolation`. This is not hypothetical — this
 account previously accumulated orphaned ALBs, security groups and 14 stale
 target groups across 11 deleted VPCs from exactly this mistake.
+
+The destroy workflow runs that cleanup through the same temporary-API-access
+wrapper, because a locked-down endpoint would otherwise make the cleanup time
+out and silently skip — recreating the problem it exists to prevent.
 
 ---
 

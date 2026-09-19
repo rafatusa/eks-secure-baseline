@@ -30,13 +30,17 @@ jobs:
         \ secrets.TF_STATE_BUCKET }}\" \\\n  -backend-config=\"key=${{ secrets.PROJECT_NAME\
         \ }}/terraform.tfstate\" \\\n  -backend-config=\"region=us-east-1\"\n"
       working-directory: infra
-    - name: Configure kubectl for pre-destroy cleanup
-      run: "CLUSTER=$(cd infra && terraform output -raw cluster_name 2>/dev/null ||\
-        \ echo \"\")\nif [ -n \"$CLUSTER\" ]; then\n  echo \"::add-mask::$CLUSTER\"\
-        \n  aws eks update-kubeconfig --region us-east-1 --name \"$CLUSTER\" || true\n\
-        else\n  echo \"No cluster in state; pre-destroy cleanup will no-op.\"\nfi\n"
     - name: Delete Kubernetes load balancers before destroy
-      run: bash scripts/pre-destroy-cleanup.sh
+      run: "# The API allowlist is locked to one administrative host, so the\n# destroy\
+        \ runner must admit itself before it can delete the\n# Kubernetes LoadBalancer\
+        \ Services. Without this the cleanup would\n# time out, silently skip, and\
+        \ leave orphaned ALBs holding ENIs that\n# block DeleteVpc \u2014 the exact\
+        \ failure pattern observed in this AWS\n# account before the project was built.\n\
+        CLUSTER=$(cd infra && terraform output -raw cluster_name 2>/dev/null || echo\
+        \ \"\")\nif [ -n \"$CLUSTER\" ]; then\n  echo \"::add-mask::$CLUSTER\"\n \
+        \ bash scripts/ci-api-access.sh \\\n    \"$CLUSTER\" us-east-1 \"${{ secrets.API_ALLOWED_CIDR\
+        \ }}\" \\\n    -- bash scripts/pre-destroy-cleanup.sh\nelse\n  echo \"No cluster\
+        \ in state; pre-destroy cleanup skipped.\"\nfi\n"
     - name: Terraform destroy
       run: terraform destroy -input=false -auto-approve
       working-directory: infra

@@ -1,0 +1,38 @@
+# Trivy suppressions for eks-secure-baseline
+#
+# POLICY: this file is the ONLY place a finding may be suppressed, every
+# entry carries a written justification, and suppressions are per-CHECK-ID.
+# The scanner itself is never weakened: `trivy config` still runs with
+# --severity HIGH,CRITICAL --exit-code 1, so any finding not listed here
+# fails the pipeline. Do not add a blanket severity filter, do not remove
+# --exit-code, and do not add an entry without a justification.
+#
+# Reviewed: 2026-09-19
+
+# -----------------------------------------------------------------------
+# AWS-0104 — "Security group rule allows egress to multiple public internet
+#             addresses" (aws_vpc_security_group_egress_rule.cluster_egress)
+# -----------------------------------------------------------------------
+# ACCEPTED RISK, not a false positive in general — but not remediable for an
+# EKS control plane security group.
+#
+# The EKS control plane's cross-account ENIs must reach worker node kubelets
+# on ephemeral ports and regional AWS service endpoints (STS, ECR, CloudWatch
+# Logs, EC2). Those endpoints are not expressible as a stable set of CIDRs or
+# prefix lists for this security group, and AWS's own EKS security group
+# requirements specify outbound 0.0.0.0/0 for the cluster security group.
+# Narrowing it breaks node registration and add-on installation — failures
+# that surface only after a full ~15 minute apply.
+#
+# Compensating controls that make this acceptable:
+#   * The SG is attached ONLY to AWS-managed control plane ENIs. No workload
+#     traffic transits it.
+#   * The SG has NO ingress rules at all: it is egress-only.
+#   * Workload egress is separately default-denied by the NetworkPolicies in
+#     k8s/hardening/network-policies.yaml, which also block the instance
+#     metadata endpoint (169.254.169.254).
+#   * Nodes have no public IPs and sit in private subnets behind a NAT gateway.
+#
+# Scope: this suppresses ONE check id. Every other HIGH/CRITICAL finding in
+# infra/ and k8s/ still fails the build.
+AWS-0104

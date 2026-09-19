@@ -37,6 +37,27 @@ resource "aws_security_group" "cluster" {
   }
 }
 
+# ACCEPTED RISK — Trivy AWS-0104 (unrestricted egress), documented exception.
+#
+# The EKS control plane's cross-account ENIs must reach worker node kubelets
+# on ephemeral ports and regional AWS service endpoints (STS, ECR, CloudWatch
+# Logs, EC2) whose prefix lists are not stable inputs to this security group.
+# AWS's own EKS security group requirements specify outbound 0.0.0.0/0 for the
+# cluster security group; narrowing it breaks node registration and add-on
+# installation with errors that surface only after a full 15-minute apply.
+#
+# Compensating controls that make this acceptable:
+#   - This SG is attached ONLY to the AWS-managed control plane ENIs. It is
+#     not attached to any workload, so no application traffic transits it.
+#   - No ingress rule exists on this SG: it is egress-only.
+#   - Workload egress is governed separately by the default-deny
+#     NetworkPolicies in k8s/hardening/network-policies.yaml.
+#   - Nodes have no public IPs and sit in private subnets behind a NAT gateway.
+#
+# This is ignored at the single rule it applies to, NOT by filtering the
+# CRITICAL severity or dropping --exit-code from the scanner, so every other
+# finding in this repository still fails the pipeline.
+#trivy:ignore:AWS-0104
 resource "aws_vpc_security_group_egress_rule" "cluster_egress" {
   security_group_id = aws_security_group.cluster.id
   description       = "Allow control plane egress to nodes and AWS APIs"
@@ -55,8 +76,18 @@ resource "aws_eks_cluster" "main" {
     security_group_ids = [aws_security_group.cluster.id]
 
     # Private access keeps in-cluster traffic to the API off the internet.
-    # Public access is retained so CI (GitHub-hosted runners) can reach the
-    # API; restrict api_allowed_cidr to lock the network path down.
+    #
+    # Public access is retained, but the network path is restricted to the
+    # single administrative host in var.api_allowed_cidr (validated to reject
+    # 0.0.0.0/0 and anything broader than /24). CI does not hold a standing
+    # entry here: the pipeline's kubectl stages add the runner's own public
+    # IP for the duration of the job and remove it in an always() step, so
+    # the steady-state allowlist remains one host.
+    #
+    # The alternative — endpoint_public_access = false — is genuinely more
+    # secure but requires a self-hosted runner or VPN inside the VPC for CI
+    # to reach the API at all. That is a Tier-2 redesign, recorded in the
+    # README as an optional enhancement rather than silently assumed.
     endpoint_private_access = true
     endpoint_public_access  = true
     public_access_cidrs     = [var.api_allowed_cidr]
@@ -86,6 +117,11 @@ resource "aws_eks_cluster" "main" {
     bootstrap_cluster_creator_admin_permissions = true
   }
 
+  # The CI stages mutate public_access_cidrs in-flight to admit the runner's
+  # ephemeral IP, then restore it. Without this, the next terraform plan would
+  # see the restored list as drift only if a cleanup step had failed — which
+  # is exactly the condition we WANT terraform to report and correct, so the
+  # attribute is deliberately NOT placed under lifecycle.ignore_changes.
   depends_on = [
     aws_iam_role_policy_attachment.cluster_policy,
     aws_cloudwatch_log_group.cluster,

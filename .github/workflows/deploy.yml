@@ -17,7 +17,7 @@ jobs:
       run: terraform fmt -check -recursive
       working-directory: infra
     - name: Terraform init (no backend)
-      run: terraform init -reconfigure -backend=false -input=false
+      run: terraform init -backend=false -input=false
       working-directory: infra
     - name: Terraform validate
       run: terraform validate
@@ -48,14 +48,36 @@ jobs:
       run: "set -euo pipefail\n# Install from the .deb package rather than a tarball:\
         \ apt verifies\n# the archive, so a truncated or HTML-bodied download fails\
         \ loudly\n# here instead of producing a corrupt binary.\n# Version verified\
-        \ to exist before pinning; a yanked release is what\n# broke the previous\
+        \ to exist before pinning; a yanked release is what\n# broke the first deploy\
         \ attempt.\nTRIVY_VERSION=\"0.74.0\"\ncurl -fsSL -o /tmp/trivy.deb \\\n  \"\
         https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.deb\"\
         \nsudo dpkg -i /tmp/trivy.deb\ntrivy --version\n"
+    - name: Show all findings (informational, does not gate)
+      run: '# Printed BEFORE the gating scans so a failure is diagnosable from
+
+        # this log alone. --exit-code 0 here: this step reports, it does
+
+        # not decide. The gating happens in the two steps below.
+
+        echo "::group::Terraform findings (all severities)"
+
+        trivy config --ignorefile .trivyignore --exit-code 0 infra/
+
+        echo "::endgroup::"
+
+        echo "::group::Kubernetes findings (all severities)"
+
+        trivy config --ignorefile .trivyignore --exit-code 0 k8s/
+
+        echo "::endgroup::"
+
+        '
     - name: Scan Terraform for misconfiguration
-      run: trivy config --severity HIGH,CRITICAL --exit-code 1 infra/
+      run: trivy config --ignorefile .trivyignore --severity HIGH,CRITICAL --exit-code
+        1 infra/
     - name: Scan Kubernetes manifests for misconfiguration
-      run: trivy config --severity HIGH,CRITICAL --exit-code 1 k8s/
+      run: trivy config --ignorefile .trivyignore --severity HIGH,CRITICAL --exit-code
+        1 k8s/
   provision:
     runs-on: ubuntu-latest
     needs:
@@ -126,15 +148,9 @@ jobs:
 
         '
       working-directory: infra
-    - name: Configure kubectl
-      run: aws eks update-kubeconfig --region us-east-1 --name "${{ steps.tf.outputs.cluster
-        }}"
-    - name: Wait for nodes to be ready
-      run: kubectl wait --for=condition=Ready nodes --all --timeout=600s
-    - name: Apply hardening baseline
-      run: kubectl apply -f k8s/hardening/
-    - name: Apply compliance scanning resources
-      run: kubectl apply -f k8s/compliance/
+    - name: Configure cluster under temporary API access
+      run: "bash scripts/ci-api-access.sh \\\n  \"${{ steps.tf.outputs.cluster }}\"\
+        \ us-east-1 \"${{ secrets.API_ALLOWED_CIDR }}\" \\\n  -- bash scripts/configure-cluster.sh\n"
   verify:
     runs-on: ubuntu-latest
     needs:
@@ -174,17 +190,10 @@ jobs:
 
         '
       working-directory: infra
-    - name: Configure kubectl
-      run: aws eks update-kubeconfig --region us-east-1 --name "${{ steps.tf.outputs.cluster
-        }}"
-    - name: Verify cluster health
-      run: kubectl get nodes -o wide
-    - name: Verify control plane readiness
-      run: kubectl get --raw='/readyz?verbose'
-    - name: Verify hardening policies applied
-      run: kubectl get networkpolicy,resourcequota -A
-    - name: Verify hardening is enforced
-      run: bash scripts/verify-pss.sh
+    - name: Verify cluster under temporary API access
+      run: "bash scripts/ci-api-access.sh \\\n  \"${{ steps.tf.outputs.cluster }}\"\
+        \ us-east-1 \"${{ secrets.API_ALLOWED_CIDR }}\" \\\n  -- bash scripts/verify-cluster.sh\
+        \ \"${{ steps.tf.outputs.cluster }}\" us-east-1\n"
   compliance:
     runs-on: ubuntu-latest
     needs:
@@ -228,17 +237,9 @@ jobs:
 
         '
       working-directory: infra
-    - name: Configure kubectl
-      run: aws eks update-kubeconfig --region us-east-1 --name "${{ steps.tf.outputs.cluster
-        }}"
-    - name: Run kube-bench CIS EKS scan
-      run: bash scripts/run-kube-bench.sh
-    - name: Run Trivy cluster misconfiguration scan
-      run: bash scripts/run-trivy-cluster.sh
-    - name: Generate compliance report
-      run: bash scripts/generate-report.sh
-    - name: Print compliance summary
-      run: cat reports/summary.txt
+    - name: Run compliance scans under temporary API access
+      run: "bash scripts/ci-api-access.sh \\\n  \"${{ steps.tf.outputs.cluster }}\"\
+        \ us-east-1 \"${{ secrets.API_ALLOWED_CIDR }}\" \\\n  -- bash scripts/run-compliance.sh\n"
     - name: Upload compliance report
       uses: actions/upload-artifact@v4
       with:

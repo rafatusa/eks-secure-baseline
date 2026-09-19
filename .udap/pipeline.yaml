@@ -55,16 +55,27 @@ stages:
           # the archive, so a truncated or HTML-bodied download fails loudly
           # here instead of producing a corrupt binary.
           # Version verified to exist before pinning; a yanked release is what
-          # broke the previous attempt.
+          # broke the first deploy attempt.
           TRIVY_VERSION="0.74.0"
           curl -fsSL -o /tmp/trivy.deb \
             "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.deb"
           sudo dpkg -i /tmp/trivy.deb
           trivy --version
+      - name: Show all findings (informational, does not gate)
+        run: |
+          # Printed BEFORE the gating scans so a failure is diagnosable from
+          # this log alone. --exit-code 0 here: this step reports, it does
+          # not decide. The gating happens in the two steps below.
+          echo "::group::Terraform findings (all severities)"
+          trivy config --ignorefile .trivyignore --exit-code 0 infra/
+          echo "::endgroup::"
+          echo "::group::Kubernetes findings (all severities)"
+          trivy config --ignorefile .trivyignore --exit-code 0 k8s/
+          echo "::endgroup::"
       - name: Scan Terraform for misconfiguration
-        run: trivy config --severity HIGH,CRITICAL --exit-code 1 infra/
+        run: trivy config --ignorefile .trivyignore --severity HIGH,CRITICAL --exit-code 1 infra/
       - name: Scan Kubernetes manifests for misconfiguration
-        run: trivy config --severity HIGH,CRITICAL --exit-code 1 k8s/
+        run: trivy config --ignorefile .trivyignore --severity HIGH,CRITICAL --exit-code 1 k8s/
 
   - id: provision
     kind: provision
@@ -134,14 +145,11 @@ stages:
           echo "::add-mask::$CLUSTER"
           echo "cluster=$CLUSTER" >> "$GITHUB_OUTPUT"
         working-directory: infra
-      - name: Configure kubectl
-        run: aws eks update-kubeconfig --region us-east-1 --name "${{ steps.tf.outputs.cluster }}"
-      - name: Wait for nodes to be ready
-        run: kubectl wait --for=condition=Ready nodes --all --timeout=600s
-      - name: Apply hardening baseline
-        run: kubectl apply -f k8s/hardening/
-      - name: Apply compliance scanning resources
-        run: kubectl apply -f k8s/compliance/
+      - name: Configure cluster under temporary API access
+        run: |
+          bash scripts/ci-api-access.sh \
+            "${{ steps.tf.outputs.cluster }}" us-east-1 "${{ secrets.API_ALLOWED_CIDR }}" \
+            -- bash scripts/configure-cluster.sh
 
   - id: verify
     kind: verify
@@ -179,16 +187,11 @@ stages:
           echo "::add-mask::$CLUSTER"
           echo "cluster=$CLUSTER" >> "$GITHUB_OUTPUT"
         working-directory: infra
-      - name: Configure kubectl
-        run: aws eks update-kubeconfig --region us-east-1 --name "${{ steps.tf.outputs.cluster }}"
-      - name: Verify cluster health
-        run: kubectl get nodes -o wide
-      - name: Verify control plane readiness
-        run: kubectl get --raw='/readyz?verbose'
-      - name: Verify hardening policies applied
-        run: kubectl get networkpolicy,resourcequota -A
-      - name: Verify hardening is enforced
-        run: bash scripts/verify-pss.sh
+      - name: Verify cluster under temporary API access
+        run: |
+          bash scripts/ci-api-access.sh \
+            "${{ steps.tf.outputs.cluster }}" us-east-1 "${{ secrets.API_ALLOWED_CIDR }}" \
+            -- bash scripts/verify-cluster.sh "${{ steps.tf.outputs.cluster }}" us-east-1
 
   - id: compliance
     kind: custom
@@ -234,16 +237,11 @@ stages:
           echo "::add-mask::$CLUSTER"
           echo "cluster=$CLUSTER" >> "$GITHUB_OUTPUT"
         working-directory: infra
-      - name: Configure kubectl
-        run: aws eks update-kubeconfig --region us-east-1 --name "${{ steps.tf.outputs.cluster }}"
-      - name: Run kube-bench CIS EKS scan
-        run: bash scripts/run-kube-bench.sh
-      - name: Run Trivy cluster misconfiguration scan
-        run: bash scripts/run-trivy-cluster.sh
-      - name: Generate compliance report
-        run: bash scripts/generate-report.sh
-      - name: Print compliance summary
-        run: cat reports/summary.txt
+      - name: Run compliance scans under temporary API access
+        run: |
+          bash scripts/ci-api-access.sh \
+            "${{ steps.tf.outputs.cluster }}" us-east-1 "${{ secrets.API_ALLOWED_CIDR }}" \
+            -- bash scripts/run-compliance.sh
       - name: Upload compliance report
         uses: actions/upload-artifact@v4
         with:
@@ -280,17 +278,23 @@ destroy:
           -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
           -backend-config="region=us-east-1"
       working-directory: infra
-    - name: Configure kubectl for pre-destroy cleanup
+    - name: Delete Kubernetes load balancers before destroy
       run: |
+        # The API allowlist is locked to one administrative host, so the
+        # destroy runner must admit itself before it can delete the
+        # Kubernetes LoadBalancer Services. Without this the cleanup would
+        # time out, silently skip, and leave orphaned ALBs holding ENIs that
+        # block DeleteVpc — the exact failure pattern observed in this AWS
+        # account before the project was built.
         CLUSTER=$(cd infra && terraform output -raw cluster_name 2>/dev/null || echo "")
         if [ -n "$CLUSTER" ]; then
           echo "::add-mask::$CLUSTER"
-          aws eks update-kubeconfig --region us-east-1 --name "$CLUSTER" || true
+          bash scripts/ci-api-access.sh \
+            "$CLUSTER" us-east-1 "${{ secrets.API_ALLOWED_CIDR }}" \
+            -- bash scripts/pre-destroy-cleanup.sh
         else
-          echo "No cluster in state; pre-destroy cleanup will no-op."
+          echo "No cluster in state; pre-destroy cleanup skipped."
         fi
-    - name: Delete Kubernetes load balancers before destroy
-      run: bash scripts/pre-destroy-cleanup.sh
     - name: Terraform destroy
       run: terraform destroy -input=false -auto-approve
       working-directory: infra

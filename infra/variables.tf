@@ -27,17 +27,39 @@ variable "k8s_version" {
 variable "api_allowed_cidr" {
   description = <<-EOT
     CIDR block permitted to reach the Kubernetes API server endpoint.
-    Set this to your public IP as x.x.x.x/32 for a hardened posture.
-    The default of 0.0.0.0/0 leaves the network path open (the API is still
-    protected by AWS IAM authentication and Kubernetes RBAC) and WILL be
-    reported as a finding by the CIS compliance scan.
+
+    This MUST be a single administrative host (x.x.x.x/32). The value is
+    supplied at deploy time from the API_ALLOWED_CIDR secret; the default
+    below is a documentation placeholder from RFC 5737 (TEST-NET-3) and is
+    deliberately NOT a routable address, so a misconfigured deploy fails
+    closed rather than exposing the API server to the internet.
+
+    A public value such as 0.0.0.0/0 is rejected by the validation block:
+    an internet-reachable API endpoint is a CRITICAL finding under both the
+    CIS Amazon EKS Benchmark and Trivy's AWS-0041 check, and this project
+    exists to be compliant, not to document its own exceptions.
+
+    CI runners do NOT need a permanent entry here. The pipeline's kubectl
+    stages add the runner's own public IP to the cluster's public access
+    CIDR list for the duration of the job and remove it afterwards, so the
+    steady-state allowlist stays exactly this one administrative host.
   EOT
   type        = string
-  default     = "0.0.0.0/0"
+  default     = "203.0.113.1/32"
 
   validation {
     condition     = can(cidrhost(var.api_allowed_cidr, 0))
     error_message = "api_allowed_cidr must be a valid CIDR block, for example 203.0.113.10/32."
+  }
+
+  validation {
+    condition     = !contains(["0.0.0.0/0", "::/0"], var.api_allowed_cidr)
+    error_message = "api_allowed_cidr must not be an open CIDR (0.0.0.0/0). Use a specific host, for example 203.0.113.10/32."
+  }
+
+  validation {
+    condition     = tonumber(split("/", var.api_allowed_cidr)[1]) >= 24
+    error_message = "api_allowed_cidr must be /24 or narrower so the API endpoint is not exposed to a broad network range."
   }
 }
 
