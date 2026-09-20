@@ -40,6 +40,37 @@
     <java.version>21</java.version>
     <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+    <!--
+      EMBEDDED TOMCAT SECURITY OVERRIDE — do not remove, do not lower.
+
+      Spring Boot 3.5.16's dependency BOM manages embedded Tomcat at 10.1.55,
+      which carries three CRITICAL CVEs (CVE-2026-65182, CVE-2026-65905,
+      CVE-2026-68525). The image stage's Trivy scan gates on HIGH/CRITICAL and
+      correctly refused to ship that image. All three are fixed in 10.1.58; we
+      pin 10.1.60, the latest published 10.1.x, so the app is not one patch
+      release behind the moment it ships.
+
+      Overriding `tomcat.version` is the mechanism Spring Boot provides for
+      exactly this: it upgrades the embedded container WITHOUT moving off the
+      3.5.16 release train, so no other managed dependency shifts underneath
+      us. The alternative — suppressing the findings in .trivyignore — would
+      leave genuine remotely-exploitable CVEs in a container sitting behind an
+      INTERNET-FACING ALB. That is not a trade we make.
+
+      WHY THE EXPLICIT <dependencies> ENTRIES BELOW TOO: this property is the
+      documented override, but if the BOM ever renames it the property would
+      be silently ignored and the vulnerable 10.1.55 would return with no
+      error — the build would go green and only Trivy would catch it. The
+      explicit dependency declarations below make the upgrade independent of
+      the property name, because a directly-declared version always wins over
+      a BOM-managed one. Belt and braces, on purpose.
+
+      Bumping this is a routine patch upgrade (embedded container only, no
+      API surface used directly by this app). Verify the version is published
+      on Maven Central before changing it.
+    -->
+    <tomcat.version>10.1.60</tomcat.version>
   </properties>
 
   <dependencies>
@@ -63,6 +94,30 @@
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-test</artifactId>
       <scope>test</scope>
+    </dependency>
+
+    <!--
+      The three embedded Tomcat artifacts starter-web pulls in transitively,
+      declared explicitly at the patched version. See the tomcat.version
+      comment above: these exist so the security upgrade cannot be silently
+      undone by a property rename in a future BOM. All three are published at
+      10.1.60 on Maven Central (verified before pinning) — they are released
+      together, so they must always move as a set.
+    -->
+    <dependency>
+      <groupId>org.apache.tomcat.embed</groupId>
+      <artifactId>tomcat-embed-core</artifactId>
+      <version>${tomcat.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.tomcat.embed</groupId>
+      <artifactId>tomcat-embed-el</artifactId>
+      <version>${tomcat.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.tomcat.embed</groupId>
+      <artifactId>tomcat-embed-websocket</artifactId>
+      <version>${tomcat.version}</version>
     </dependency>
   </dependencies>
 
