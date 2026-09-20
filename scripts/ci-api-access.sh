@@ -61,6 +61,23 @@ fi
 # The cluster name derives from PROJECT_NAME, which is a secret.
 echo "::add-mask::${CLUSTER}"
 
+# Guard against a caller passing something that is not a cluster name at
+# all. `terraform output` run through the setup-terraform wrapper merges
+# stderr into stdout, so a state with no outputs can yield a multi-line
+# "Warning: No outputs found" banner where a name was expected. EKS cluster
+# names are a single token of [A-Za-z0-9_-], up to 100 characters.
+if ! printf '%s' "${CLUSTER}" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$'; then
+  echo "ERROR: '<cluster>' is not a valid EKS cluster name. The caller most" >&2
+  echo "likely passed diagnostic text (for example a 'No outputs found'" >&2
+  echo "warning) instead of a name read from terraform state." >&2
+  exit 1
+fi
+
+cluster_exists() {
+  aws eks describe-cluster --name "${CLUSTER}" --region "${REGION}" >/dev/null 2>&1
+}
+
+# Returns 0 when ACTIVE, 2 when the cluster does not exist, 1 on timeout.
 wait_for_active() {
   local attempt=0
   local status
@@ -68,8 +85,8 @@ wait_for_active() {
     # A cluster that does not exist can never become ACTIVE. Detect that
     # explicitly instead of burning the full 10 minute wait: the destroy
     # workflow legitimately runs when the cluster is already gone.
-    if ! aws eks describe-cluster --name "${CLUSTER}" --region "${REGION}" >/dev/null 2>&1; then
-      echo "Cluster ${CLUSTER} does not exist; nothing to wait for."
+    if ! cluster_exists; then
+      echo "Cluster does not exist; nothing to wait for."
       return 2
     fi
     status="$(aws eks describe-cluster \
@@ -88,25 +105,43 @@ wait_for_active() {
   return 1
 }
 
+# Returns 0 on success, 2 when the cluster is gone (nothing to apply), 1 on
+# any other failure. The return code MUST be inspected by callers: under
+# `set -e` a bare call would abort the whole script on the benign
+# "cluster already deleted" path, which is exactly what destroy hits.
 apply_cidrs() {
   local cidrs="$1"
-  wait_for_active
+  local rc=0
+  wait_for_active || rc=$?
+  if [ "${rc}" -ne 0 ]; then
+    return "${rc}"
+  fi
   aws eks update-cluster-config \
     --name "${CLUSTER}" \
     --region "${REGION}" \
     --resources-vpc-config "publicAccessCidrs=${cidrs},endpointPublicAccess=true,endpointPrivateAccess=true" \
-    >/dev/null
-  wait_for_active
+    >/dev/null || return 1
+  wait_for_active || rc=$?
+  if [ "${rc}" -ne 0 ]; then
+    return "${rc}"
+  fi
+  return 0
 }
 
 revoke() {
   # Runs from the EXIT trap. Must never change the script's exit status:
   # the wrapped command's result is what the pipeline stage reports.
   local rc=$?
+  local apply_rc=0
   echo "::group::Restoring API allowlist to the administrative host"
-  if aws eks describe-cluster --name "${CLUSTER}" --region "${REGION}" >/dev/null 2>&1; then
-    if apply_cidrs "${BASE_CIDR}"; then
+  if cluster_exists; then
+    apply_cidrs "${BASE_CIDR}" || apply_rc=$?
+    if [ "${apply_rc}" -eq 0 ]; then
       echo "Allowlist restored to ${BASE_CIDR} (administrative host only)."
+    elif [ "${apply_rc}" -eq 2 ]; then
+      # The cluster was deleted while the wrapped command ran (the normal
+      # destroy case). There is no allowlist left to restore.
+      echo "Cluster no longer exists; nothing to revoke."
     else
       # Loud, because a failed revoke leaves the endpoint wider than intended.
       echo "WARNING: failed to restore the API allowlist. The runner IP may" >&2
@@ -120,6 +155,18 @@ revoke() {
   echo "::endgroup::"
   exit "${rc}"
 }
+
+# If the cluster is already gone there is no endpoint to open and no
+# allowlist to restore. This is a NORMAL state for the destroy workflow
+# (resuming a partial teardown, or re-running after the cluster was
+# deleted). Run the wrapped command anyway — the cleanup scripts detect an
+# unreachable cluster themselves and skip — so `terraform destroy` still
+# gets to remove the remaining infrastructure.
+if ! cluster_exists; then
+  echo "Cluster does not exist in ${REGION}; skipping temporary API access."
+  echo "Running the wrapped command without an access window."
+  exec "$@"
+fi
 
 # Resolve the runner's own egress IP. Two independent providers so a single
 # endpoint outage does not fail the deploy; -f so an HTTP error page is
@@ -143,11 +190,20 @@ echo "Granting temporary API access to runner ${RUNNER_IP}/32 (base: ${BASE_CIDR
 # grant and the command still restores the locked-down state.
 trap revoke EXIT INT TERM
 
-apply_cidrs "${BASE_CIDR},${RUNNER_IP}/32"
-echo "Temporary access granted; running wrapped command."
-
-# Configure kubectl inside the access window so every caller gets a working
-# kubeconfig without repeating this in each stage.
-aws eks update-kubeconfig --region "${REGION}" --name "${CLUSTER}"
+grant_rc=0
+apply_cidrs "${BASE_CIDR},${RUNNER_IP}/32" || grant_rc=$?
+if [ "${grant_rc}" -eq 2 ]; then
+  # Cluster disappeared between the check above and the update. Nothing to
+  # open, nothing to revoke — carry on with the wrapped command.
+  echo "Cluster disappeared before access could be granted; continuing without it."
+elif [ "${grant_rc}" -ne 0 ]; then
+  echo "ERROR: failed to grant temporary API access." >&2
+  exit "${grant_rc}"
+else
+  echo "Temporary access granted; running wrapped command."
+  # Configure kubectl inside the access window so every caller gets a working
+  # kubeconfig without repeating this in each stage.
+  aws eks update-kubeconfig --region "${REGION}" --name "${CLUSTER}"
+fi
 
 "$@"
