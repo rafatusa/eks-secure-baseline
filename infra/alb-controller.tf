@@ -262,8 +262,8 @@ resource "aws_iam_policy" "alb_controller" {
         }
       },
       {
-        Effect   = "Allow"
-        Action   = ["elasticloadbalancing:AddTags"]
+        Effect = "Allow"
+        Action = ["elasticloadbalancing:AddTags"]
         Resource = [
           "arn:${data.aws_partition.current.partition}:elasticloadbalancing:*:*:targetgroup/*/*",
           "arn:${data.aws_partition.current.partition}:elasticloadbalancing:*:*:loadbalancer/net/*/*",
