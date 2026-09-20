@@ -1,0 +1,24 @@
+---
+# Application namespace.
+#
+# 'restricted' is the strictest built-in Pod Security Standard and it is set
+# to ENFORCE, not just warn: a pod that runs as root, allows privilege
+# escalation, or mounts a hostPath is REJECTED by the API server rather than
+# admitted with a warning nobody reads.
+#
+# The application is built to satisfy this rather than being granted an
+# exception to it — the image declares a numeric non-root UID, binds port
+# 8080 (above 1024, so no NET_BIND_SERVICE capability is needed), and writes
+# only to a mounted emptyDir.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: app
+  labels:
+    name: app
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest

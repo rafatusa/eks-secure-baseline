@@ -1,0 +1,87 @@
+---
+# Default-deny for the app namespace, matching the baseline applied to
+# 'default' and 'compliance'. Every allowance below is additive and explicit.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: app
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# ---------------------------------------------------------------------------
+# Ingress from the load balancer.
+#
+# THE RULE SHAPE HERE IS NOT INTERCHANGEABLE WITH A podSelector.
+#
+# The Ingress uses alb.ingress.kubernetes.io/target-type: ip, so the ALB
+# registers pod IPs as targets and connects to them DIRECTLY from its own
+# elastic network interfaces in the VPC's public subnets. There is no
+# ingress-controller pod in the path — the "controller" only programs AWS,
+# it never proxies traffic.
+#
+# A rule written as `from: [podSelector: {ingress-controller}]`, which is the
+# correct shape for ingress-nginx, matches nothing at all here. The result is
+# a pod that is healthy, a target group that reports every target unhealthy,
+# and an ALB returning 502 — with no error anywhere to explain it.
+#
+# The allowance is therefore an ipBlock covering the VPC CIDR, which is where
+# the ALB ENIs live. It is scoped to the VPC rather than 0.0.0.0/0 so nothing
+# outside this VPC can reach the pods even if a route existed, and to port
+# 8080 only.
+# ---------------------------------------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-alb-ingress
+  namespace: app
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: baseline-app
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - ipBlock:
+            # Substituted with the VPC CIDR from terraform output at deploy
+            # time, so this never drifts from the actual network.
+            cidr: VPC_CIDR_PLACEHOLDER
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+# DNS egress must be re-granted explicitly after a default-deny egress
+# policy. Without it every outbound name resolution fails and the symptom
+# looks like an application bug rather than a policy one.
+#
+# The app itself makes no outbound calls, so DNS is the ONLY egress granted.
+# There is deliberately no HTTPS egress rule: a compromised container has no
+# network path out of the cluster to exfiltrate over.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: app
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: baseline-app
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

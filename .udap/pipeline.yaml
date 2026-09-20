@@ -41,7 +41,28 @@ stages:
           sudo install -m 0755 /tmp/kubeconform /usr/local/bin/kubeconform
           kubeconform -v
       - name: Validate Kubernetes manifests
-        run: kubeconform -strict -summary -skip CustomResourceDefinition k8s/
+        run: |
+          set -euo pipefail
+          # k8s/hardening and k8s/compliance are applied as committed and are
+          # validated directly.
+          kubeconform -strict -summary -skip CustomResourceDefinition \
+            k8s/hardening/ k8s/compliance/
+
+          # k8s/app carries IMAGE_PLACEHOLDER / VERSION_PLACEHOLDER /
+          # VPC_CIDR_PLACEHOLDER, substituted at deploy time by
+          # scripts/deploy-app.sh. The placeholders are schema-valid strings
+          # so these files validate as-is, but the CIDR one is not a valid
+          # ipBlock, so render a copy with throwaway values first. This
+          # validates the STRUCTURE the cluster will actually receive rather
+          # than the template.
+          rendered="$(mktemp -d)"
+          cp k8s/app/*.yaml "$rendered/"
+          sed -i \
+            -e 's|IMAGE_PLACEHOLDER|example.com/app:validation|g' \
+            -e 's|VERSION_PLACEHOLDER|validation|g' \
+            -e 's|VPC_CIDR_PLACEHOLDER|10.20.0.0/16|g' \
+            "$rendered"/*.yaml
+          kubeconform -strict -summary -skip CustomResourceDefinition "$rendered/"
 
   - id: security
     kind: security
@@ -83,11 +104,12 @@ stages:
       # invocation (which ignore file is passed), not by per-entry path
       # syntax inside the ignore file.
       #
-      #   infra/           -> .trivyignore             (AWS-0104 only)
+      #   infra/           -> .trivyignore             (AWS-0040/0041/0104)
       #   k8s/hardening/   -> NO ignore file           (fully gated)
+      #   k8s/app/         -> NO ignore file           (fully gated)
       #   k8s/compliance/  -> .trivyignore-kube-bench  (scanner Job only)
       #
-      # All three keep --severity HIGH,CRITICAL --exit-code 1.
+      # All four keep --severity HIGH,CRITICAL --exit-code 1.
       # ---------------------------------------------------------------
       - name: Scan Terraform for misconfiguration
         run: trivy config --ignorefile .trivyignore --severity HIGH,CRITICAL --exit-code 1 infra/
@@ -95,8 +117,14 @@ stages:
       - name: Scan Kubernetes hardening manifests (no suppressions)
         run: trivy config --severity HIGH,CRITICAL --exit-code 1 k8s/hardening/
 
+      - name: Scan application manifests (no suppressions)
+        run: trivy config --severity HIGH,CRITICAL --exit-code 1 k8s/app/
+
       - name: Scan kube-bench scanner Job (scanner-specific suppressions)
         run: trivy config --ignorefile .trivyignore-kube-bench --severity HIGH,CRITICAL --exit-code 1 k8s/compliance/
+
+      - name: Scan the application Dockerfile
+        run: trivy config --severity HIGH,CRITICAL --exit-code 1 app/
 
   - id: provision
     kind: provision
@@ -152,6 +180,10 @@ stages:
         uses: azure/setup-kubectl@v3
         with:
           version: "v1.33.0"
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "v3.16.3"
       - name: Terraform init
         run: |
           terraform init -input=false -reconfigure \
@@ -170,7 +202,7 @@ stages:
         run: |
           bash scripts/ci-api-access.sh \
             "${{ steps.tf.outputs.cluster }}" us-east-1 "${{ secrets.API_ALLOWED_CIDR }}" \
-            -- bash scripts/configure-cluster.sh
+            -- bash scripts/configure-cluster.sh "${{ steps.tf.outputs.cluster }}" us-east-1
 
   - id: verify
     kind: verify
@@ -270,6 +302,165 @@ stages:
           path: reports/
           retention-days: 90
 
+# ---------------------------------------------------------------------------
+# EXTRA WORKFLOW: application release.
+#
+# Rendered to .github/workflows/app-deploy.yml as its own workflow_dispatch
+# workflow. It is INDEPENDENT of the deploy backbone above: it never runs
+# terraform apply and never touches cluster-wide configuration, so shipping a
+# new application version cannot disturb the compliance baseline or the
+# cluster's hardening.
+#
+# It DOES run terraform init + output (read-only) because several values it
+# needs — the ECR repository URL, the VPC CIDR, the cluster name — live in
+# state and must not be threaded through job outputs: they embed the project
+# name, which is a secret, and GitHub silently drops job outputs containing
+# secret substrings.
+# ---------------------------------------------------------------------------
+pipelines:
+  - id: app-deploy
+    stages:
+      - id: build
+        kind: build
+        timeout_minutes: 20
+        steps:
+          - name: Set up JDK 21
+            uses: actions/setup-java@v4
+            with:
+              # Spring Boot 3.5.x has a Java 17 baseline and supports 21; 21
+              # (current LTS) is pinned deliberately. This must match the
+              # Dockerfile base images and <release> in pom.xml; a drift shows
+              # up as a compile error or UnsupportedClassVersionError at
+              # runtime, neither of which names the version pin that caused it.
+              java-version: "21"
+              distribution: temurin
+              cache: maven
+          - name: Build and test
+            # `verify` runs the full test suite. The tests assert the landing
+            # page renders, the probe endpoints exist, and the sensitive
+            # actuator endpoints stay unexposed — the last of which is a
+            # security control, not a feature.
+            run: mvn -B verify
+            working-directory: app
+
+      - id: image
+        kind: build_push
+        needs: [build]
+        timeout_minutes: 25
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: us-east-1
+          AWS_DEFAULT_REGION: us-east-1
+          TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
+          TF_VAR_aws_region: us-east-1
+          TF_VAR_api_allowed_cidr: ${{ secrets.API_ALLOWED_CIDR }}
+          TF_VAR_billing_alarm_email: ${{ secrets.BILLING_ALARM_EMAIL }}
+        steps:
+          - name: Set up Terraform
+            uses: hashicorp/setup-terraform@v3
+            with:
+              terraform_version: "1.9.8"
+          - name: Terraform init
+            run: |
+              terraform init -input=false -reconfigure \
+                -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+                -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
+                -backend-config="region=us-east-1"
+            working-directory: infra
+          - name: Build, scan and push the image
+            # One step so the image reference never has to cross a job
+            # boundary: the ECR URL embeds the account id and project name,
+            # and a job output carrying it would be silently dropped.
+            run: bash scripts/build-push-image.sh "${{ github.sha }}"
+
+      - id: deploy
+        kind: custom
+        needs: [image]
+        timeout_minutes: 25
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: us-east-1
+          AWS_DEFAULT_REGION: us-east-1
+          TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
+          TF_VAR_aws_region: us-east-1
+          TF_VAR_api_allowed_cidr: ${{ secrets.API_ALLOWED_CIDR }}
+          TF_VAR_billing_alarm_email: ${{ secrets.BILLING_ALARM_EMAIL }}
+        steps:
+          - name: Set up Terraform
+            uses: hashicorp/setup-terraform@v3
+            with:
+              terraform_version: "1.9.8"
+          - name: Set up kubectl
+            uses: azure/setup-kubectl@v3
+            with:
+              version: "v1.33.0"
+          - name: Terraform init
+            run: |
+              terraform init -input=false -reconfigure \
+                -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+                -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
+                -backend-config="region=us-east-1"
+            working-directory: infra
+          - name: Read cluster name and image reference from state
+            id: tf
+            run: |
+              set -euo pipefail
+              CLUSTER=$(cd infra && terraform output -raw cluster_name)
+              echo "::add-mask::$CLUSTER"
+              echo "cluster=$CLUSTER" >> "$GITHUB_OUTPUT"
+          - name: Deploy the application under temporary API access
+            run: |
+              set -euo pipefail
+              ECR_URL=$(cd infra && terraform output -raw ecr_repository_url)
+              echo "::add-mask::$ECR_URL"
+              bash scripts/ci-api-access.sh \
+                "${{ steps.tf.outputs.cluster }}" us-east-1 "${{ secrets.API_ALLOWED_CIDR }}" \
+                -- bash scripts/deploy-app.sh "${ECR_URL}:${{ github.sha }}" "${{ github.sha }}"
+
+      - id: verify-app
+        kind: verify
+        needs: [deploy]
+        timeout_minutes: 25
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: us-east-1
+          AWS_DEFAULT_REGION: us-east-1
+          TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
+          TF_VAR_aws_region: us-east-1
+          TF_VAR_api_allowed_cidr: ${{ secrets.API_ALLOWED_CIDR }}
+          TF_VAR_billing_alarm_email: ${{ secrets.BILLING_ALARM_EMAIL }}
+        steps:
+          - name: Set up Terraform
+            uses: hashicorp/setup-terraform@v3
+            with:
+              terraform_version: "1.9.8"
+          - name: Set up kubectl
+            uses: azure/setup-kubectl@v3
+            with:
+              version: "v1.33.0"
+          - name: Terraform init
+            run: |
+              terraform init -input=false -reconfigure \
+                -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+                -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
+                -backend-config="region=us-east-1"
+            working-directory: infra
+          - name: Read cluster name from state
+            id: tf
+            run: |
+              CLUSTER=$(terraform output -raw cluster_name)
+              echo "::add-mask::$CLUSTER"
+              echo "cluster=$CLUSTER" >> "$GITHUB_OUTPUT"
+            working-directory: infra
+          - name: Verify the public endpoint under temporary API access
+            run: |
+              bash scripts/ci-api-access.sh \
+                "${{ steps.tf.outputs.cluster }}" us-east-1 "${{ secrets.API_ALLOWED_CIDR }}" \
+                -- bash scripts/verify-app.sh
+
 rollback:
   strategy: manual
 
@@ -303,10 +494,15 @@ destroy:
       run: |
         # The API allowlist is locked to one administrative host, so the
         # destroy runner must admit itself before it can delete the
-        # Kubernetes LoadBalancer Services. Without this the cleanup would
-        # time out, silently skip, and leave orphaned ALBs holding ENIs that
-        # block DeleteVpc — the exact failure pattern observed in this AWS
-        # account before the project was built.
+        # Kubernetes LoadBalancer Services and Ingresses. Without this the
+        # cleanup would time out, silently skip, and leave orphaned ALBs
+        # holding ENIs that block DeleteVpc — the exact failure pattern
+        # observed in this AWS account before the project was built.
+        #
+        # pre-destroy-cleanup.sh deletes BOTH LoadBalancer Services and
+        # Ingress resources across all namespaces, then waits for the AWS
+        # load balancers to actually disappear, so the app's Ingress-created
+        # ALB is covered with no extra wiring.
         CLUSTER=$(cd infra && terraform output -raw cluster_name 2>/dev/null || echo "")
         if [ -n "$CLUSTER" ]; then
           echo "::add-mask::$CLUSTER"

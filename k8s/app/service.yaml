@@ -1,0 +1,23 @@
+---
+# ClusterIP, not LoadBalancer.
+#
+# The Ingress is what causes an ALB to be created. Making this a
+# LoadBalancer Service as well would provision a SECOND cloud load balancer
+# (an NLB) for the same pods — double the cost, and a second public entry
+# point that nothing routes to but which still accepts connections.
+apiVersion: v1
+kind: Service
+metadata:
+  name: baseline-app
+  namespace: app
+  labels:
+    app.kubernetes.io/name: baseline-app
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: baseline-app
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

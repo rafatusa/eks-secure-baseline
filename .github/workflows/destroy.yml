@@ -33,14 +33,18 @@ jobs:
     - name: Delete Kubernetes load balancers before destroy
       run: "# The API allowlist is locked to one administrative host, so the\n# destroy\
         \ runner must admit itself before it can delete the\n# Kubernetes LoadBalancer\
-        \ Services. Without this the cleanup would\n# time out, silently skip, and\
-        \ leave orphaned ALBs holding ENIs that\n# block DeleteVpc \u2014 the exact\
-        \ failure pattern observed in this AWS\n# account before the project was built.\n\
-        CLUSTER=$(cd infra && terraform output -raw cluster_name 2>/dev/null || echo\
-        \ \"\")\nif [ -n \"$CLUSTER\" ]; then\n  echo \"::add-mask::$CLUSTER\"\n \
-        \ bash scripts/ci-api-access.sh \\\n    \"$CLUSTER\" us-east-1 \"${{ secrets.API_ALLOWED_CIDR\
-        \ }}\" \\\n    -- bash scripts/pre-destroy-cleanup.sh\nelse\n  echo \"No cluster\
-        \ in state; pre-destroy cleanup skipped.\"\nfi\n"
+        \ Services and Ingresses. Without this the\n# cleanup would time out, silently\
+        \ skip, and leave orphaned ALBs\n# holding ENIs that block DeleteVpc \u2014\
+        \ the exact failure pattern\n# observed in this AWS account before the project\
+        \ was built.\n#\n# pre-destroy-cleanup.sh deletes BOTH LoadBalancer Services\
+        \ and\n# Ingress resources across all namespaces, then waits for the AWS\n\
+        # load balancers to actually disappear, so the app's Ingress-created\n# ALB\
+        \ is covered with no extra wiring.\nCLUSTER=$(cd infra && terraform output\
+        \ -raw cluster_name 2>/dev/null || echo \"\")\nif [ -n \"$CLUSTER\" ]; then\n\
+        \  echo \"::add-mask::$CLUSTER\"\n  bash scripts/ci-api-access.sh \\\n   \
+        \ \"$CLUSTER\" us-east-1 \"${{ secrets.API_ALLOWED_CIDR }}\" \\\n    -- bash\
+        \ scripts/pre-destroy-cleanup.sh\nelse\n  echo \"No cluster in state; pre-destroy\
+        \ cleanup skipped.\"\nfi\n"
     - name: Terraform destroy
       run: terraform destroy -input=false -auto-approve
       working-directory: infra

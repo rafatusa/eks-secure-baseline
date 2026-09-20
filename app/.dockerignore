@@ -1,0 +1,14 @@
+# Keep the build context small and free of anything that should not reach a
+# registry. target/ in particular would ship a locally-built jar into the
+# image layer cache and can mask a broken build.
+target/
+.git/
+.gitignore
+*.md
+.idea/
+.vscode/
+*.iml
+.env
+.env.*
+*.log
+.DS_Store

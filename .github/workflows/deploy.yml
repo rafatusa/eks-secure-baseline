@@ -17,7 +17,7 @@ jobs:
       run: terraform fmt -check -recursive
       working-directory: infra
     - name: Terraform init (no backend)
-      run: terraform init -reconfigure -backend=false -input=false
+      run: terraform init -backend=false -input=false
       working-directory: infra
     - name: Terraform validate
       run: terraform validate
@@ -36,7 +36,18 @@ jobs:
         \ntar -xzf /tmp/kubeconform.tar.gz -C /tmp\nsudo install -m 0755 /tmp/kubeconform\
         \ /usr/local/bin/kubeconform\nkubeconform -v\n"
     - name: Validate Kubernetes manifests
-      run: kubeconform -strict -summary -skip CustomResourceDefinition k8s/
+      run: "set -euo pipefail\n# k8s/hardening and k8s/compliance are applied as committed\
+        \ and are\n# validated directly.\nkubeconform -strict -summary -skip CustomResourceDefinition\
+        \ \\\n  k8s/hardening/ k8s/compliance/\n\n# k8s/app carries IMAGE_PLACEHOLDER\
+        \ / VERSION_PLACEHOLDER /\n# VPC_CIDR_PLACEHOLDER, substituted at deploy time\
+        \ by\n# scripts/deploy-app.sh. The placeholders are schema-valid strings\n\
+        # so these files validate as-is, but the CIDR one is not a valid\n# ipBlock,\
+        \ so render a copy with throwaway values first. This\n# validates the STRUCTURE\
+        \ the cluster will actually receive rather\n# than the template.\nrendered=\"\
+        $(mktemp -d)\"\ncp k8s/app/*.yaml \"$rendered/\"\nsed -i \\\n  -e 's|IMAGE_PLACEHOLDER|example.com/app:validation|g'\
+        \ \\\n  -e 's|VERSION_PLACEHOLDER|validation|g' \\\n  -e 's|VPC_CIDR_PLACEHOLDER|10.20.0.0/16|g'\
+        \ \\\n  \"$rendered\"/*.yaml\nkubeconform -strict -summary -skip CustomResourceDefinition\
+        \ \"$rendered/\"\n"
   security:
     runs-on: ubuntu-latest
     needs:
@@ -65,9 +76,13 @@ jobs:
         1 infra/
     - name: Scan Kubernetes hardening manifests (no suppressions)
       run: trivy config --severity HIGH,CRITICAL --exit-code 1 k8s/hardening/
+    - name: Scan application manifests (no suppressions)
+      run: trivy config --severity HIGH,CRITICAL --exit-code 1 k8s/app/
     - name: Scan kube-bench scanner Job (scanner-specific suppressions)
       run: trivy config --ignorefile .trivyignore-kube-bench --severity HIGH,CRITICAL
         --exit-code 1 k8s/compliance/
+    - name: Scan the application Dockerfile
+      run: trivy config --severity HIGH,CRITICAL --exit-code 1 app/
   provision:
     runs-on: ubuntu-latest
     needs:
@@ -123,6 +138,10 @@ jobs:
       uses: azure/setup-kubectl@v3
       with:
         version: v1.33.0
+    - name: Set up Helm
+      uses: azure/setup-helm@v4
+      with:
+        version: v3.16.3
     - name: Terraform init
       run: "terraform init -input=false -reconfigure \\\n  -backend-config=\"bucket=${{\
         \ secrets.TF_STATE_BUCKET }}\" \\\n  -backend-config=\"key=${{ secrets.PROJECT_NAME\
@@ -140,7 +159,8 @@ jobs:
       working-directory: infra
     - name: Configure cluster under temporary API access
       run: "bash scripts/ci-api-access.sh \\\n  \"${{ steps.tf.outputs.cluster }}\"\
-        \ us-east-1 \"${{ secrets.API_ALLOWED_CIDR }}\" \\\n  -- bash scripts/configure-cluster.sh\n"
+        \ us-east-1 \"${{ secrets.API_ALLOWED_CIDR }}\" \\\n  -- bash scripts/configure-cluster.sh\
+        \ \"${{ steps.tf.outputs.cluster }}\" us-east-1\n"
   verify:
     runs-on: ubuntu-latest
     needs:

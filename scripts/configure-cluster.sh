@@ -5,8 +5,16 @@
 # Invoked through scripts/ci-api-access.sh, which has already granted this
 # runner temporary API access and configured kubectl. Do not call
 # `aws eks update-kubeconfig` here — the wrapper owns that.
+#
+# USAGE
+#   bash scripts/configure-cluster.sh <cluster-name> <region>
 
 set -euo pipefail
+
+CLUSTER_NAME="${1:?usage: configure-cluster.sh <cluster-name> <region>}"
+REGION="${2:?region required}"
+
+echo "::add-mask::${CLUSTER_NAME}"
 
 echo "::group::Waiting for nodes to become Ready"
 # The managed node group reports ACTIVE before kubelets have registered, so
@@ -21,6 +29,22 @@ echo "::group::Applying hardening baseline"
 # ordering within the directory.
 kubectl apply -f k8s/hardening/namespace.yaml
 kubectl apply -f k8s/hardening/
+echo "::endgroup::"
+
+echo "::group::Installing the AWS Load Balancer Controller"
+# Platform capability, not application deployment.
+#
+# WHY IT LIVES IN configure AND NOT IN THE APP PIPELINE
+# -----------------------------------------------------
+# The controller is cluster infrastructure: it is the component that turns an
+# Ingress resource into a real ALB. Installing it here means the app pipeline
+# can deploy and roll back application versions without ever touching
+# cluster-wide components or re-running terraform, which is the entire point
+# of keeping the two pipelines separate.
+#
+# It is also idempotent (`helm upgrade --install`), so running it on every
+# deploy reconciles drift rather than conflicting with an existing release.
+bash scripts/install-alb-controller.sh "${CLUSTER_NAME}" "${REGION}"
 echo "::endgroup::"
 
 # ---------------------------------------------------------------------------
@@ -51,4 +75,14 @@ echo "::endgroup::"
 # do not re-add a blanket `kubectl apply -f k8s/compliance/`.
 # ---------------------------------------------------------------------------
 
-echo "Cluster configuration complete (hardening baseline applied)."
+# ---------------------------------------------------------------------------
+# k8s/app/ IS ALSO NOT APPLIED HERE — for a different reason.
+# ---------------------------------------------------------------------------
+# The application manifests carry IMAGE_PLACEHOLDER, which is substituted with
+# a real ECR reference by scripts/deploy-app.sh. They are not applicable as
+# committed, and the app-deploy pipeline owns them end to end. Applying them
+# here would both fail and re-couple application releases to the baseline
+# deploy that the separate pipeline exists to avoid.
+# ---------------------------------------------------------------------------
+
+echo "Cluster configuration complete (hardening baseline + load balancer controller)."

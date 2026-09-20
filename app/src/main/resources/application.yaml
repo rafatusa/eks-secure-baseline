@@ -1,0 +1,51 @@
+spring:
+  application:
+    name: baseline-app
+  lifecycle:
+    # Graceful shutdown window. On SIGTERM the server stops accepting new
+    # connections and finishes in-flight requests within this period.
+    # Kubernetes sends SIGTERM then waits terminationGracePeriodSeconds (30 in
+    # the Deployment) before SIGKILL, so this must stay comfortably below that
+    # or rolling updates will drop requests mid-flight.
+    timeout-per-shutdown-phase: 20s
+
+server:
+  port: 8080
+  shutdown: graceful
+  error:
+    # Return a minimal error body. Stack traces and exception messages in HTTP
+    # responses hand a caller a map of the framework, its version and the
+    # internal class layout.
+    include-stacktrace: never
+    include-message: never
+
+app:
+  # Overridden at deploy time with the image tag, so the running version is
+  # visible on the landing page without shelling into the pod.
+  version: ${APP_VERSION:dev}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # ONLY health. The default exposure already excludes most endpoints,
+        # but being explicit means a future dependency that auto-registers an
+        # endpoint cannot quietly publish it. /actuator/env and
+        # /actuator/configprops in particular leak configuration values.
+        include: health
+  endpoint:
+    health:
+      # Probe details are not shown to callers: the ALB health check and the
+      # kubelet only need the HTTP status code.
+      show-details: never
+      probes:
+        # Publishes /actuator/health/liveness and /actuator/health/readiness
+        # with distinct semantics: readiness fails while the app is still
+        # warming up, liveness fails only when the process is unrecoverable
+        # and genuinely needs a restart.
+        enabled: true
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true

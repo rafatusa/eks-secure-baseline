@@ -1,0 +1,70 @@
+---
+# Ingress → internet-facing Application Load Balancer.
+#
+# The AWS Load Balancer Controller watches this resource and provisions a
+# real ALB in the account. Provisioning takes 2-4 minutes on first creation;
+# .status.loadBalancer stays empty for roughly the first 90 seconds, which is
+# why the verify stage polls rather than reading the address once.
+#
+# >>> PUBLIC EXPOSURE <<<
+# This is an internet-facing load balancer. The cluster's /32 API allowlist
+# protects the CONTROL PLANE only and does not apply here — this ALB accepts
+# connections from anywhere. That is the accepted, deliberate consequence of
+# publishing a web application. To restrict it to a single office or home
+# address instead, set inbound-cidrs below to that /32.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: baseline-app
+  namespace: app
+  labels:
+    app.kubernetes.io/name: baseline-app
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+
+    # target-type: ip registers POD IPs directly as ALB targets, rather than
+    # registering node ports on every node. This is what allows the pods to
+    # stay in private subnets, removes the extra kube-proxy hop, and lets the
+    # ALB health-check the pod itself. It also determines the NetworkPolicy
+    # shape: traffic arrives from ALB ENIs inside the VPC, so the ingress
+    # allow rule must be an ipBlock over the VPC CIDR, NOT a podSelector.
+    alb.ingress.kubernetes.io/target-type: ip
+
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+
+    # The ALB health check is independent of the Kubernetes probes and must
+    # point at the same health endpoint, or the ALB will keep draining
+    # targets that Kubernetes considers perfectly healthy.
+    alb.ingress.kubernetes.io/healthcheck-path: /actuator/health
+    alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: "5"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "3"
+    alb.ingress.kubernetes.io/success-codes: "200"
+
+    # Deregistration delay: how long the ALB keeps sending in-flight requests
+    # to a pod that is shutting down. Kept below the pod's 30s termination
+    # grace period so draining finishes before SIGKILL.
+    alb.ingress.kubernetes.io/target-group-attributes: deregistration_delay.timeout_seconds=20
+
+    # Explicit placement in the public subnets. Discovery by the
+    # kubernetes.io/role/elb tag already works here, but naming the tag makes
+    # the dependency visible rather than implicit.
+    alb.ingress.kubernetes.io/subnets-tag-key: kubernetes.io/role/elb
+
+    alb.ingress.kubernetes.io/tags: Project=eks-secure-baseline,ManagedBy=udap
+spec:
+  # Without ingressClassName the controller IGNORES this resource entirely:
+  # no error, no event, no address — it simply never provisions anything.
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: baseline-app
+                port:
+                  name: http

@@ -23,6 +23,17 @@ output "vpc_id" {
   value       = aws_vpc.main.id
 }
 
+output "vpc_cidr" {
+  description = <<-EOT
+    CIDR block of the VPC.
+
+    Consumed by the application NetworkPolicy. With ALB target-type=ip the
+    load balancer sends traffic from its own ENIs inside the VPC, so the
+    ingress allow rule is an ipBlock covering the VPC — NOT a podSelector.
+  EOT
+  value       = aws_vpc.main.cidr_block
+}
+
 output "private_subnet_ids" {
   description = "Private subnet IDs hosting the worker nodes."
   value       = aws_subnet.private[*].id
@@ -46,6 +57,26 @@ output "oidc_provider_arn" {
 output "compliance_scanner_role_arn" {
   description = "IRSA role ARN annotated onto the compliance-scanner service account."
   value       = aws_iam_role.compliance_scanner.arn
+}
+
+output "alb_controller_role_arn" {
+  description = <<-EOT
+    IRSA role ARN annotated onto the aws-load-balancer-controller service
+    account. Read by the configure stage when installing the Helm chart.
+  EOT
+  value       = aws_iam_role.alb_controller.arn
+}
+
+output "ecr_repository_url" {
+  description = <<-EOT
+    Registry URL of the application image repository.
+
+    The app pipeline reads this from terraform state directly rather than
+    receiving it through a job output: the URL embeds the account ID and the
+    project name, and GitHub silently DROPS any job output whose value
+    contains a secret substring (PROJECT_NAME is a secret).
+  EOT
+  value       = aws_ecr_repository.app.repository_url
 }
 
 output "api_allowed_cidr" {

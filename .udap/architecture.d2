@@ -1,39 +1,50 @@
 # udap:meta cloud=aws region=us-east-1 target=eks
 
 operator: Operator / CI { shape: person; udap-type: generic.user }
+internet: Public Internet Users { shape: person; udap-type: generic.user }
 vpc: VPC 10.20.0.0/16 (2 AZ) {
   igw: Internet Gateway { shape: rectangle; udap-type: aws.internetgateway }
   nat: NAT Gateway { shape: rectangle; udap-type: aws.natgateway }
+  alb: Application Load Balancer internet-facing { shape: rectangle; udap-type: aws.alb }
   pub_a: Public Subnet A 10.20.0.0/20 { shape: rectangle; udap-type: aws.subnet }
   pub_b: Public Subnet B 10.20.16.0/20 { shape: rectangle; udap-type: aws.subnet }
   priv_a: Private Subnet A 10.20.32.0/20 { shape: rectangle; udap-type: aws.subnet }
   priv_b: Private Subnet B 10.20.48.0/20 { shape: rectangle; udap-type: aws.subnet }
   nodes: Managed Node Group AL2023 2x t3.medium { shape: rectangle; udap-type: aws.eks }
+  app: Spring Boot App ns=app PSA restricted 2 replicas { shape: rectangle; udap-type: generic.app }
+  lbc: AWS Load Balancer Controller IRSA { shape: rectangle; udap-type: generic.app }
   bench: kube-bench Job CIS EKS { shape: rectangle; udap-type: generic.app }
   trivy: Trivy Scan Job { shape: rectangle; udap-type: generic.app }
 }
 eks: EKS Control Plane v1.33 { shape: rectangle; udap-type: aws.eks }
 kms: KMS Key envelope encryption { shape: rectangle; udap-type: aws.kms }
-ecr: ECR scanner images { shape: rectangle; udap-type: aws.ecr }
+ecr: ECR scanner + app images { shape: rectangle; udap-type: aws.ecr }
 logs: CloudWatch Logs audit + authenticator { shape: rectangle; udap-type: aws.cloudwatch }
 alarm: CloudWatch Billing Alarm { shape: rectangle; udap-type: aws.cloudwatch }
 reports: Compliance Report Artifact { shape: rectangle; udap-type: generic.app }
 
-operator -> eks: kubectl via IAM + RBAC
+operator -> eks: kubectl via IAM + RBAC (/32 allowlist)
 operator -> vpc.nodes: no direct access
+internet -> vpc.alb: HTTP 80 public
+vpc.alb -> vpc.app: target-type ip port 8080
+vpc.lbc -> vpc.alb: provisions from Ingress
+eks -> vpc.lbc: watches Ingress
 eks -> vpc.nodes: manages
 eks -> kms: encrypts secrets
 eks -> logs: audit + authenticator logs
 vpc.igw -> vpc.pub_a: ingress
 vpc.igw -> vpc.pub_b: ingress
+vpc.pub_a -> vpc.alb: hosts
+vpc.pub_b -> vpc.alb: hosts
 vpc.pub_a -> vpc.nat: egress path
 vpc.nat -> vpc.priv_a: outbound only
 vpc.nat -> vpc.priv_b: outbound only
 vpc.priv_a -> vpc.nodes: hosts
 vpc.priv_b -> vpc.nodes: hosts
+vpc.nodes -> vpc.app: runs
 vpc.nodes -> vpc.bench: runs
 vpc.nodes -> vpc.trivy: runs
 vpc.bench -> reports: CIS findings JSON
 vpc.trivy -> reports: misconfig + CVE findings
-ecr -> vpc.nodes: scanner images
+ecr -> vpc.nodes: scanner + app images
 alarm -> operator: cost alert

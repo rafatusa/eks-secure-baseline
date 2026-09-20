@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <!--
+    Spring Boot 3.5.16 — the latest published 3.x release, verified against
+    the upstream release list before pinning (tag v3.5.16, published, not a
+    prerelease).
+
+    WHY 3.x AND NOT 4.x: 4.x is a new major line with breaking changes. This
+    project's build had never been executed at the time the version was
+    chosen, so pinning an unbuilt project to a brand-new major would have put
+    two unverified risks in the same change. 3.5.x is the mature line and the
+    APIs used here are stable in it.
+
+    JAVA VERSION: Spring Boot 3.5.x builds on Java 17 as its baseline and
+    supports 21. We pin 21 (the current LTS) deliberately — it satisfies the
+    floor with room to spare. The Dockerfile base images, setup-java in the
+    app-deploy workflow and the <release> below must all stay at 21: a drift
+    between them fails either at compile time or with
+    UnsupportedClassVersionError at runtime, and neither error names the
+    version pin that actually caused it.
+  -->
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.5.16</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>com.udap</groupId>
+  <artifactId>baseline-app</artifactId>
+  <version>1.0.0</version>
+  <name>baseline-app</name>
+  <description>Landing page served from the eks-secure-baseline cluster</description>
+
+  <properties>
+    <java.version>21</java.version>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+
+    <!--
+      Actuator supplies the health endpoint the Kubernetes probes and the ALB
+      target-group health check all call. Only /actuator/health is exposed;
+      see application.yaml. Without this dependency the probes would have to
+      hit '/', which returns 200 even when a dependency is broken.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>
