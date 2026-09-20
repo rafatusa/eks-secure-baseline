@@ -65,6 +65,13 @@ wait_for_active() {
   local attempt=0
   local status
   while [ "${attempt}" -lt 60 ]; do
+    # A cluster that does not exist can never become ACTIVE. Detect that
+    # explicitly instead of burning the full 10 minute wait: the destroy
+    # workflow legitimately runs when the cluster is already gone.
+    if ! aws eks describe-cluster --name "${CLUSTER}" --region "${REGION}" >/dev/null 2>&1; then
+      echo "Cluster ${CLUSTER} does not exist; nothing to wait for."
+      return 2
+    fi
     status="$(aws eks describe-cluster \
       --name "${CLUSTER}" \
       --region "${REGION}" \
