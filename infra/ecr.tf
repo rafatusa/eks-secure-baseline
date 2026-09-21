@@ -17,19 +17,17 @@ resource "aws_ecr_repository" "app" {
   # conflicts with a legitimate re-push.
   image_tag_mutability = "IMMUTABLE"
 
-  # Allow `terraform destroy` to delete the repository even though the
-  # pipeline has pushed SHA-tagged images into it.
+  # DeleteRepository fails with RepositoryNotEmptyException while any image
+  # remains, and terraform surfaces that as a failed destroy with no obvious
+  # remedy. Since the pipeline pushes a SHA-tagged image on every app
+  # release, ANY project that has shipped once cannot be torn down without
+  # this flag — the teardown of this project failed on exactly that.
   #
-  # Every run of the deploy pipeline pushes a new image, so at teardown time
-  # this repository is NEVER empty. Without force_delete the ECR API rejects
-  # DeleteRepository with RepositoryNotEmptyException (400) and the destroy
-  # job fails after the VPC, EKS cluster and IAM roles have already been
-  # torn down — leaving the stack half-destroyed and the state file dirty.
-  #
-  # This only affects deliberate `terraform destroy` runs. It is not a
-  # weakening of the retention controls: the lifecycle policy below still
-  # governs image expiry during normal operation, and immutable tags still
-  # prevent a deployed tag from being rewritten in place.
+  # This is safe here because the repository is a CACHE, not a system of
+  # record: every image in it is reproducible by rebuilding its commit, and
+  # destroying the cluster that pulls them is already the explicit intent.
+  # It only ever applies during `terraform destroy`, which is itself behind
+  # the platform's strictest approval gate.
   force_delete = true
 
   # Scan every pushed image for OS and library CVEs. Findings are visible in
