@@ -76,19 +76,17 @@ jobs:
       working-directory: infra
     - id: tf
       name: Read cluster name and image reference from state
-      run: 'set -euo pipefail
-
-        CLUSTER=$(cd infra && terraform output -raw cluster_name)
-
-        echo "::add-mask::$CLUSTER"
-
-        echo "cluster=$CLUSTER" >> "$GITHUB_OUTPUT"
-
-        '
+      run: "set -euo pipefail\nCLUSTER=\"$(bash scripts/tf-output.sh cluster_name\
+        \ infra)\"\nif [ -z \"$CLUSTER\" ]; then\n  echo \"ERROR: cluster_name is\
+        \ not present in terraform state.\" >&2\n  echo \"The cluster must be provisioned\
+        \ before deploying the app.\" >&2\n  exit 1\nfi\necho \"::add-mask::$CLUSTER\"\
+        \necho \"cluster=$CLUSTER\" >> \"$GITHUB_OUTPUT\"\n"
     - name: Deploy the application under temporary API access
-      run: "set -euo pipefail\nECR_URL=$(cd infra && terraform output -raw ecr_repository_url)\n\
-        echo \"::add-mask::$ECR_URL\"\nbash scripts/ci-api-access.sh \\\n  \"${{ steps.tf.outputs.cluster\
-        \ }}\" us-east-1 \"${{ secrets.API_ALLOWED_CIDR }}\" \\\n  -- bash scripts/deploy-app.sh\
+      run: "set -euo pipefail\nECR_URL=\"$(bash scripts/tf-output.sh ecr_repository_url\
+        \ infra)\"\nif [ -z \"$ECR_URL\" ]; then\n  echo \"ERROR: ecr_repository_url\
+        \ is not present in terraform state.\" >&2\n  exit 1\nfi\necho \"::add-mask::$ECR_URL\"\
+        \nbash scripts/ci-api-access.sh \\\n  \"${{ steps.tf.outputs.cluster }}\"\
+        \ us-east-1 \"${{ secrets.API_ALLOWED_CIDR }}\" \\\n  -- bash scripts/deploy-app.sh\
         \ \"${ECR_URL}:${{ github.sha }}\" \"${{ github.sha }}\"\n"
   verify-app:
     runs-on: ubuntu-latest
@@ -121,14 +119,10 @@ jobs:
       working-directory: infra
     - id: tf
       name: Read cluster name from state
-      run: 'CLUSTER=$(terraform output -raw cluster_name)
-
-        echo "::add-mask::$CLUSTER"
-
-        echo "cluster=$CLUSTER" >> "$GITHUB_OUTPUT"
-
-        '
-      working-directory: infra
+      run: "set -euo pipefail\nCLUSTER=\"$(bash scripts/tf-output.sh cluster_name\
+        \ infra)\"\nif [ -z \"$CLUSTER\" ]; then\n  echo \"ERROR: cluster_name is\
+        \ not present in terraform state.\" >&2\n  exit 1\nfi\necho \"::add-mask::$CLUSTER\"\
+        \necho \"cluster=$CLUSTER\" >> \"$GITHUB_OUTPUT\"\n"
     - name: Verify the public endpoint under temporary API access
       run: "bash scripts/ci-api-access.sh \\\n  \"${{ steps.tf.outputs.cluster }}\"\
         \ us-east-1 \"${{ secrets.API_ALLOWED_CIDR }}\" \\\n  -- bash scripts/verify-app.sh\n"

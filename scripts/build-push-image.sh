@@ -25,7 +25,12 @@ TAG="${1:?usage: build-push-image.sh <tag>}"
 REGION="${AWS_REGION:-us-east-1}"
 
 echo "==> Reading the ECR repository URL from terraform state"
-ECR_URL="$(cd infra && terraform output -raw ecr_repository_url)"
+# scripts/tf-output.sh rather than a bare `terraform output -raw`: that
+# command EXITS 0 and prints the placeholder `<ecr_repository_url>` when the
+# state has no outputs, so the emptiness check below would pass the
+# placeholder through and docker would fail much later with an unhelpful
+# registry error. tf-output.sh validates the VALUE, so the check works.
+ECR_URL="$(bash scripts/tf-output.sh ecr_repository_url infra)"
 
 if [ -z "${ECR_URL}" ]; then
   echo "ERROR: ecr_repository_url is empty in terraform state." >&2

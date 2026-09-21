@@ -17,7 +17,7 @@ jobs:
       run: terraform fmt -check -recursive
       working-directory: infra
     - name: Terraform init (no backend)
-      run: terraform init -reconfigure -backend=false -input=false
+      run: terraform init -backend=false -input=false
       working-directory: infra
     - name: Terraform validate
       run: terraform validate
@@ -149,14 +149,14 @@ jobs:
       working-directory: infra
     - id: tf
       name: Read cluster name from state
-      run: 'CLUSTER=$(terraform output -raw cluster_name)
-
-        echo "::add-mask::$CLUSTER"
-
-        echo "cluster=$CLUSTER" >> "$GITHUB_OUTPUT"
-
-        '
-      working-directory: infra
+      run: "set -euo pipefail\n# scripts/tf-output.sh, not a bare `terraform output`:\
+        \ that command\n# exits 0 and prints the placeholder `<cluster_name>` when\
+        \ the state\n# has no outputs, so a plain `|| echo \"\"` guard passes the\n\
+        # placeholder downstream as if it were real.\nCLUSTER=\"$(bash scripts/tf-output.sh\
+        \ cluster_name infra)\"\nif [ -z \"$CLUSTER\" ]; then\n  echo \"ERROR: cluster_name\
+        \ is not present in terraform state.\" >&2\n  echo \"Provision must run before\
+        \ configure.\" >&2\n  exit 1\nfi\necho \"::add-mask::$CLUSTER\"\necho \"cluster=$CLUSTER\"\
+        \ >> \"$GITHUB_OUTPUT\"\n"
     - name: Configure cluster under temporary API access
       run: "bash scripts/ci-api-access.sh \\\n  \"${{ steps.tf.outputs.cluster }}\"\
         \ us-east-1 \"${{ secrets.API_ALLOWED_CIDR }}\" \\\n  -- bash scripts/configure-cluster.sh\
@@ -192,14 +192,10 @@ jobs:
       working-directory: infra
     - id: tf
       name: Read cluster name from state
-      run: 'CLUSTER=$(terraform output -raw cluster_name)
-
-        echo "::add-mask::$CLUSTER"
-
-        echo "cluster=$CLUSTER" >> "$GITHUB_OUTPUT"
-
-        '
-      working-directory: infra
+      run: "set -euo pipefail\nCLUSTER=\"$(bash scripts/tf-output.sh cluster_name\
+        \ infra)\"\nif [ -z \"$CLUSTER\" ]; then\n  echo \"ERROR: cluster_name is\
+        \ not present in terraform state.\" >&2\n  exit 1\nfi\necho \"::add-mask::$CLUSTER\"\
+        \necho \"cluster=$CLUSTER\" >> \"$GITHUB_OUTPUT\"\n"
     - name: Verify cluster under temporary API access
       run: "bash scripts/ci-api-access.sh \\\n  \"${{ steps.tf.outputs.cluster }}\"\
         \ us-east-1 \"${{ secrets.API_ALLOWED_CIDR }}\" \\\n  -- bash scripts/verify-cluster.sh\
@@ -239,14 +235,10 @@ jobs:
       working-directory: infra
     - id: tf
       name: Read cluster name from state
-      run: 'CLUSTER=$(terraform output -raw cluster_name)
-
-        echo "::add-mask::$CLUSTER"
-
-        echo "cluster=$CLUSTER" >> "$GITHUB_OUTPUT"
-
-        '
-      working-directory: infra
+      run: "set -euo pipefail\nCLUSTER=\"$(bash scripts/tf-output.sh cluster_name\
+        \ infra)\"\nif [ -z \"$CLUSTER\" ]; then\n  echo \"ERROR: cluster_name is\
+        \ not present in terraform state.\" >&2\n  exit 1\nfi\necho \"::add-mask::$CLUSTER\"\
+        \necho \"cluster=$CLUSTER\" >> \"$GITHUB_OUTPUT\"\n"
     - name: Run compliance scans under temporary API access
       run: "bash scripts/ci-api-access.sh \\\n  \"${{ steps.tf.outputs.cluster }}\"\
         \ us-east-1 \"${{ secrets.API_ALLOWED_CIDR }}\" \\\n  -- bash scripts/run-compliance.sh\n"

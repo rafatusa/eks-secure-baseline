@@ -72,7 +72,13 @@ else
 fi
 
 echo "==> Waiting up to ${WAIT_SECONDS}s for AWS load balancers to disappear"
-VPC_ID="$(cd infra && terraform output -raw vpc_id 2>/dev/null || echo "")"
+# scripts/tf-output.sh rather than a bare `terraform output -raw vpc_id`:
+# that command exits 0 and prints the placeholder `<vpc_id>` when the state
+# has no outputs, so `|| echo ""` does not catch it. The placeholder would
+# then be used as a VpcId filter below, matching nothing, and this loop
+# would report "all load balancers are gone" without having checked
+# anything — a false all-clear on the exact failure this script prevents.
+VPC_ID="$(bash scripts/tf-output.sh vpc_id infra)"
 
 if [ -z "${VPC_ID}" ]; then
   echo "    No vpc_id in terraform state; skipping the wait."

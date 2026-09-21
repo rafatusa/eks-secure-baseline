@@ -194,10 +194,19 @@ stages:
       - name: Read cluster name from state
         id: tf
         run: |
-          CLUSTER=$(terraform output -raw cluster_name)
+          set -euo pipefail
+          # scripts/tf-output.sh, not a bare `terraform output`: that command
+          # exits 0 and prints the placeholder `<cluster_name>` when the state
+          # has no outputs, so a plain `|| echo ""` guard passes the
+          # placeholder downstream as if it were real.
+          CLUSTER="$(bash scripts/tf-output.sh cluster_name infra)"
+          if [ -z "$CLUSTER" ]; then
+            echo "ERROR: cluster_name is not present in terraform state." >&2
+            echo "Provision must run before configure." >&2
+            exit 1
+          fi
           echo "::add-mask::$CLUSTER"
           echo "cluster=$CLUSTER" >> "$GITHUB_OUTPUT"
-        working-directory: infra
       - name: Configure cluster under temporary API access
         run: |
           bash scripts/ci-api-access.sh \
@@ -236,10 +245,14 @@ stages:
       - name: Read cluster name from state
         id: tf
         run: |
-          CLUSTER=$(terraform output -raw cluster_name)
+          set -euo pipefail
+          CLUSTER="$(bash scripts/tf-output.sh cluster_name infra)"
+          if [ -z "$CLUSTER" ]; then
+            echo "ERROR: cluster_name is not present in terraform state." >&2
+            exit 1
+          fi
           echo "::add-mask::$CLUSTER"
           echo "cluster=$CLUSTER" >> "$GITHUB_OUTPUT"
-        working-directory: infra
       - name: Verify cluster under temporary API access
         run: |
           bash scripts/ci-api-access.sh \
@@ -286,10 +299,14 @@ stages:
       - name: Read cluster name from state
         id: tf
         run: |
-          CLUSTER=$(terraform output -raw cluster_name)
+          set -euo pipefail
+          CLUSTER="$(bash scripts/tf-output.sh cluster_name infra)"
+          if [ -z "$CLUSTER" ]; then
+            echo "ERROR: cluster_name is not present in terraform state." >&2
+            exit 1
+          fi
           echo "::add-mask::$CLUSTER"
           echo "cluster=$CLUSTER" >> "$GITHUB_OUTPUT"
-        working-directory: infra
       - name: Run compliance scans under temporary API access
         run: |
           bash scripts/ci-api-access.sh \
@@ -407,13 +424,22 @@ pipelines:
             id: tf
             run: |
               set -euo pipefail
-              CLUSTER=$(cd infra && terraform output -raw cluster_name)
+              CLUSTER="$(bash scripts/tf-output.sh cluster_name infra)"
+              if [ -z "$CLUSTER" ]; then
+                echo "ERROR: cluster_name is not present in terraform state." >&2
+                echo "The cluster must be provisioned before deploying the app." >&2
+                exit 1
+              fi
               echo "::add-mask::$CLUSTER"
               echo "cluster=$CLUSTER" >> "$GITHUB_OUTPUT"
           - name: Deploy the application under temporary API access
             run: |
               set -euo pipefail
-              ECR_URL=$(cd infra && terraform output -raw ecr_repository_url)
+              ECR_URL="$(bash scripts/tf-output.sh ecr_repository_url infra)"
+              if [ -z "$ECR_URL" ]; then
+                echo "ERROR: ecr_repository_url is not present in terraform state." >&2
+                exit 1
+              fi
               echo "::add-mask::$ECR_URL"
               bash scripts/ci-api-access.sh \
                 "${{ steps.tf.outputs.cluster }}" us-east-1 "${{ secrets.API_ALLOWED_CIDR }}" \
@@ -451,10 +477,14 @@ pipelines:
           - name: Read cluster name from state
             id: tf
             run: |
-              CLUSTER=$(terraform output -raw cluster_name)
+              set -euo pipefail
+              CLUSTER="$(bash scripts/tf-output.sh cluster_name infra)"
+              if [ -z "$CLUSTER" ]; then
+                echo "ERROR: cluster_name is not present in terraform state." >&2
+                exit 1
+              fi
               echo "::add-mask::$CLUSTER"
               echo "cluster=$CLUSTER" >> "$GITHUB_OUTPUT"
-            working-directory: infra
           - name: Verify the public endpoint under temporary API access
             run: |
               bash scripts/ci-api-access.sh \
@@ -492,6 +522,7 @@ destroy:
       working-directory: infra
     - name: Delete Kubernetes load balancers before destroy
       run: |
+        set -euo pipefail
         # The API allowlist is locked to one administrative host, so the
         # destroy runner must admit itself before it can delete the
         # Kubernetes LoadBalancer Services and Ingresses. Without this the
@@ -503,14 +534,28 @@ destroy:
         # Ingress resources across all namespaces, then waits for the AWS
         # load balancers to actually disappear, so the app's Ingress-created
         # ALB is covered with no extra wiring.
-        CLUSTER=$(cd infra && terraform output -raw cluster_name 2>/dev/null || echo "")
+        #
+        # RESUMED TEARDOWNS: when a previous destroy already removed the
+        # cluster, the state keeps its remaining resources but loses its
+        # outputs. `terraform output -raw cluster_name` then EXITS 0 and
+        # prints the placeholder `<cluster_name>`, so the obvious
+        # `|| echo ""` guard does NOT catch it and the placeholder is passed
+        # on as a cluster name. scripts/tf-output.sh validates the VALUE and
+        # returns empty in that case, so cleanup is correctly skipped and
+        # terraform destroy still runs — which is the whole point of this
+        # job. This is a SKIP, never a failure: there is no cluster left to
+        # clean up, and nothing must stand between a resumed teardown and
+        # the destroy step below.
+        CLUSTER="$(bash scripts/tf-output.sh cluster_name infra)"
         if [ -n "$CLUSTER" ]; then
           echo "::add-mask::$CLUSTER"
           bash scripts/ci-api-access.sh \
             "$CLUSTER" us-east-1 "${{ secrets.API_ALLOWED_CIDR }}" \
             -- bash scripts/pre-destroy-cleanup.sh
         else
-          echo "No cluster in state; pre-destroy cleanup skipped."
+          echo "==> No cluster_name in terraform state; in-cluster cleanup skipped."
+          echo "    Normal when resuming a teardown that already removed the"
+          echo "    cluster. Proceeding directly to terraform destroy."
         fi
     - name: Terraform destroy
       run: terraform destroy -input=false -auto-approve

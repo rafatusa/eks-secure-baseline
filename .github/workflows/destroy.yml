@@ -31,20 +31,31 @@ jobs:
         \ }}/terraform.tfstate\" \\\n  -backend-config=\"region=us-east-1\"\n"
       working-directory: infra
     - name: Delete Kubernetes load balancers before destroy
-      run: "# The API allowlist is locked to one administrative host, so the\n# destroy\
-        \ runner must admit itself before it can delete the\n# Kubernetes LoadBalancer\
-        \ Services and Ingresses. Without this the\n# cleanup would time out, silently\
-        \ skip, and leave orphaned ALBs\n# holding ENIs that block DeleteVpc \u2014\
-        \ the exact failure pattern\n# observed in this AWS account before the project\
-        \ was built.\n#\n# pre-destroy-cleanup.sh deletes BOTH LoadBalancer Services\
-        \ and\n# Ingress resources across all namespaces, then waits for the AWS\n\
-        # load balancers to actually disappear, so the app's Ingress-created\n# ALB\
-        \ is covered with no extra wiring.\nCLUSTER=$(cd infra && terraform output\
-        \ -raw cluster_name 2>/dev/null || echo \"\")\nif [ -n \"$CLUSTER\" ]; then\n\
-        \  echo \"::add-mask::$CLUSTER\"\n  bash scripts/ci-api-access.sh \\\n   \
-        \ \"$CLUSTER\" us-east-1 \"${{ secrets.API_ALLOWED_CIDR }}\" \\\n    -- bash\
-        \ scripts/pre-destroy-cleanup.sh\nelse\n  echo \"No cluster in state; pre-destroy\
-        \ cleanup skipped.\"\nfi\n"
+      run: "set -euo pipefail\n# The API allowlist is locked to one administrative\
+        \ host, so the\n# destroy runner must admit itself before it can delete the\n\
+        # Kubernetes LoadBalancer Services and Ingresses. Without this the\n# cleanup\
+        \ would time out, silently skip, and leave orphaned ALBs\n# holding ENIs that\
+        \ block DeleteVpc \u2014 the exact failure pattern\n# observed in this AWS\
+        \ account before the project was built.\n#\n# pre-destroy-cleanup.sh deletes\
+        \ BOTH LoadBalancer Services and\n# Ingress resources across all namespaces,\
+        \ then waits for the AWS\n# load balancers to actually disappear, so the app's\
+        \ Ingress-created\n# ALB is covered with no extra wiring.\n#\n# RESUMED TEARDOWNS:\
+        \ when a previous destroy already removed the\n# cluster, the state keeps\
+        \ its remaining resources but loses its\n# outputs. `terraform output -raw\
+        \ cluster_name` then EXITS 0 and\n# prints the placeholder `<cluster_name>`,\
+        \ so the obvious\n# `|| echo \"\"` guard does NOT catch it and the placeholder\
+        \ is passed\n# on as a cluster name. scripts/tf-output.sh validates the VALUE\
+        \ and\n# returns empty in that case, so cleanup is correctly skipped and\n\
+        # terraform destroy still runs \u2014 which is the whole point of this\n#\
+        \ job. This is a SKIP, never a failure: there is no cluster left to\n# clean\
+        \ up, and nothing must stand between a resumed teardown and\n# the destroy\
+        \ step below.\nCLUSTER=\"$(bash scripts/tf-output.sh cluster_name infra)\"\
+        \nif [ -n \"$CLUSTER\" ]; then\n  echo \"::add-mask::$CLUSTER\"\n  bash scripts/ci-api-access.sh\
+        \ \\\n    \"$CLUSTER\" us-east-1 \"${{ secrets.API_ALLOWED_CIDR }}\" \\\n\
+        \    -- bash scripts/pre-destroy-cleanup.sh\nelse\n  echo \"==> No cluster_name\
+        \ in terraform state; in-cluster cleanup skipped.\"\n  echo \"    Normal when\
+        \ resuming a teardown that already removed the\"\n  echo \"    cluster. Proceeding\
+        \ directly to terraform destroy.\"\nfi\n"
     - name: Terraform destroy
       run: terraform destroy -input=false -auto-approve
       working-directory: infra
