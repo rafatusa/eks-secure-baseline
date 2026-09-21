@@ -62,14 +62,22 @@ fi
 echo "::add-mask::${CLUSTER}"
 
 # Guard against a caller passing something that is not a cluster name at
-# all. `terraform output` run through the setup-terraform wrapper merges
-# stderr into stdout, so a state with no outputs can yield a multi-line
+# all. terraform run through the setup-terraform wrapper merges stderr into
+# stdout, so a state whose outputs cannot be evaluated yields a multi-line
 # "Warning: No outputs found" banner where a name was expected. EKS cluster
 # names are a single token of [A-Za-z0-9_-], up to 100 characters.
 if ! printf '%s' "${CLUSTER}" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$'; then
-  echo "ERROR: '<cluster>' is not a valid EKS cluster name. The caller most" >&2
-  echo "likely passed diagnostic text (for example a 'No outputs found'" >&2
-  echo "warning) instead of a name read from terraform state." >&2
+  # ECHO THE ACTUAL VALUE (first line, truncated). An error that prints only
+  # a placeholder for the rejected value sends the reader after the wrong
+  # bug — that mistake cost two teardown attempts on this project, because
+  # the literal '<cluster>' in an earlier version of this message was read
+  # as the value terraform had produced. Show what was really received.
+  printf 'ERROR: not a valid EKS cluster name (first 100 chars): %.100s\n' \
+    "$(printf '%s' "${CLUSTER}" | head -n 1)" >&2
+  echo "The caller most likely passed diagnostic text (for example a" >&2
+  echo "'No outputs found' warning) instead of a name read from terraform" >&2
+  echo "state. Read outputs via scripts/tf-output.sh, which validates the" >&2
+  echo "value rather than trusting terraform's exit status." >&2
   exit 1
 fi
 
@@ -193,17 +201,20 @@ trap revoke EXIT INT TERM
 grant_rc=0
 apply_cidrs "${BASE_CIDR},${RUNNER_IP}/32" || grant_rc=$?
 if [ "${grant_rc}" -eq 2 ]; then
-  # Cluster disappeared between the check above and the update. Nothing to
-  # open, nothing to revoke — carry on with the wrapped command.
-  echo "Cluster disappeared before access could be granted; continuing without it."
+  # Cluster vanished between the check above and now.
+  echo "Cluster disappeared before access could be granted; running the"
+  echo "wrapped command without an access window."
+  "$@"
+  exit $?
 elif [ "${grant_rc}" -ne 0 ]; then
   echo "ERROR: failed to grant temporary API access." >&2
-  exit "${grant_rc}"
-else
-  echo "Temporary access granted; running wrapped command."
-  # Configure kubectl inside the access window so every caller gets a working
-  # kubeconfig without repeating this in each stage.
-  aws eks update-kubeconfig --region "${REGION}" --name "${CLUSTER}"
+  exit 1
 fi
+
+echo "Temporary access granted; running wrapped command."
+
+# Configure kubectl inside the access window so every caller gets a working
+# kubeconfig without repeating this in each stage.
+aws eks update-kubeconfig --region "${REGION}" --name "${CLUSTER}"
 
 "$@"

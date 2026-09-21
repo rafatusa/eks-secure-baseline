@@ -6,47 +6,39 @@
 # WHY THIS EXISTS
 # ---------------
 # `terraform output -raw <name>` does NOT fail the way shell authors expect
-# when the state has no outputs. Observed on this project during a RESUMED
-# teardown (the cluster had already been destroyed, so the state held
-# resources but no outputs):
+# when the output cannot be evaluated. Observed on this project during a
+# RESUMED teardown: a previous destroy had removed aws_eks_cluster.main, so
+# `output "cluster_name" { value = aws_eks_cluster.main.name }` had nothing
+# to evaluate. In that state terraform:
 #
-#   * it prints a `Warning: No outputs found` block to STDERR, and
-#   * it prints the literal placeholder text `<cluster>` to STDOUT, and
-#   * it EXITS 0.
+#   * prints a multi-line `Warning: No outputs found` banner, and
+#   * EXITS 0.
+#
+# Worse, the pipeline runs terraform through hashicorp/setup-terraform,
+# whose wrapper MERGES STDERR INTO STDOUT. So the warning banner arrives on
+# stdout, where a caller expects the value. `2>/dev/null` does not suppress
+# it, because by then it is no longer on stderr.
 #
 # The consequence is that the idiomatic guard
 #
 #     VALUE=$(terraform output -raw name 2>/dev/null || echo "")
 #     if [ -n "$VALUE" ]; then ...
 #
-# is silently WRONG. `2>/dev/null` hides the warning, the `||` branch never
-# runs because the exit status is 0, and `$VALUE` becomes the placeholder
-# `<cluster>` — a non-empty string. The guard passes and the placeholder is
-# handed onward as if it were a real cluster name.
+# is silently WRONG on every count: the redirect does not remove the banner,
+# the `||` branch never runs because the status is 0, and `$VALUE` becomes a
+# large chunk of diagnostic prose — non-empty, so the guard PASSES and the
+# prose is handed onward as if it were an identifier.
 #
-# THE setup-terraform WRAPPER — THE PART THAT BIT US
-# --------------------------------------------------
-# `hashicorp/setup-terraform` installs a WRAPPER script on PATH as
-# `terraform` unless `terraform_wrapper: false` is set (it defaults to
-# true, and this repo never disables it). That wrapper runs the real
-# binary, captures both streams, and re-emits the child's STDERR on the
-# WRAPPER'S OWN STDOUT (so it can publish `stdout`/`stderr` step outputs).
+# THE RULE: never trust the EXIT STATUS of `terraform output`, and never
+# merely blocklist known-bad shapes. VALIDATE THE VALUE POSITIVELY — accept
+# only something that looks like the identifier you asked for, and treat
+# everything else as absent.
 #
-# This means `2>/dev/null` on the wrapper discards NOTHING useful: the
-# "Warning: No outputs found" banner has already been folded into stdout
-# before our redirect is ever consulted, and it lands in $VALUE. Squeezing
-# whitespace out of that banner yields a long non-empty token, and a
-# `case '<'*'>'` test only matches a value that is ENTIRELY bracketed, so
-# the banner sails straight through both guards and reaches the caller.
-#
-# That is exactly how a teardown failed here: `ci-api-access.sh` received
-# the banner text as its cluster argument and correctly refused it, but
-# only AFTER terraform destroy had been prevented from running.
-#
-# THE RULE: never trust the EXIT STATUS of `terraform output` alone, never
-# trust that stdout is clean, and always validate the SHAPE of the value.
-# This helper centralises that so every call site gets the same behaviour
-# instead of each reinventing a guard that looks right.
+# (An earlier version of this script blocklisted values wrapped in angle
+# brackets. That was insufficient: the real banner is multi-line prose, not
+# a `<placeholder>` token, so it slipped straight through. A blocklist can
+# only reject the failure modes you already thought of; an allowlist rejects
+# every one you did not.)
 #
 # USAGE
 #   VALUE="$(bash scripts/tf-output.sh <output-name> [terraform-dir])"
@@ -66,69 +58,48 @@ set -euo pipefail
 NAME="${1:?usage: tf-output.sh <output-name> [terraform-dir]}"
 DIR="${2:-infra}"
 
-# Prefer the REAL terraform binary over the setup-terraform wrapper.
-#
-# setup-terraform exports TERRAFORM_CLI_PATH pointing at the directory that
-# holds the untouched binary it downloaded (as `terraform-bin`), with the
-# wrapper shadowing it on PATH as `terraform`. Calling the binary directly
-# keeps stdout and stderr as separate streams, which is the whole premise
-# of reading a value from stdout. If the wrapper is not in use we simply
-# fall back to whatever `terraform` resolves to.
-TF_BIN="terraform"
-if [ -n "${TERRAFORM_CLI_PATH:-}" ] && [ -x "${TERRAFORM_CLI_PATH}/terraform-bin" ]; then
-  TF_BIN="${TERRAFORM_CLI_PATH}/terraform-bin"
+# stderr is redirected as well as captured: with the setup-terraform wrapper
+# the warning already comes back on stdout, so the redirect alone can never
+# be the defence. The decision below is made purely from the VALUE.
+VALUE="$(cd "${DIR}" && terraform output -raw "${NAME}" 2>/dev/null || true)"
+
+# A real terraform output value is a SINGLE LINE. Every diagnostic terraform
+# emits ("Warning: No outputs found", "The state file either has no outputs
+# defined...") is multi-line. Reject anything with a newline before doing
+# anything else — this alone catches the banner regardless of its wording,
+# which matters because the wording changes between terraform versions.
+if [ "$(printf '%s' "${VALUE}" | wc -l)" -gt 0 ]; then
+  printf ''
+  exit 0
 fi
 
-# stderr is discarded deliberately: when the output is missing, terraform
-# writes a multi-line warning there that is noise for the caller. The
-# decision is made from the VALUE below, never from stderr or the status.
-# Belt and braces — even if a wrapper still merges the streams, the shape
-# validation further down rejects the result.
-VALUE="$(cd "${DIR}" && "${TF_BIN}" output -raw "${NAME}" 2>/dev/null || true)"
+# Trim surrounding whitespace only (not internal), so a trailing newline
+# cannot masquerade as content.
+VALUE="$(printf '%s' "${VALUE}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 
-# A REAL `terraform output -raw` value is a single line with no newline of
-# its own. Diagnostic banners are multi-line. So if more than one non-empty
-# line came back, this is not a value — treat the output as absent rather
-# than trying to salvage a name out of prose.
-if [ "$(printf '%s' "${VALUE}" | tr -d '\r' | grep -c . || true)" -gt 1 ]; then
-  VALUE=""
+if [ -z "${VALUE}" ]; then
+  printf ''
+  exit 0
 fi
-
-# Strip whitespace/newlines so a trailing newline cannot masquerade as content.
-VALUE="$(printf '%s' "${VALUE}" | tr -d '[:space:]')"
-
-# REJECT anything containing terraform's placeholder brackets ANYWHERE, not
-# just a value that is entirely bracketed. When an output is undefined,
-# terraform echoes the requested name wrapped in angle brackets (e.g.
-# `<cluster>`), and a merged-stream wrapper can surround it with banner
-# text so the value is not bracketed end to end. Angle brackets can never
-# appear in a real AWS identifier — not in a cluster name, a VPC id, an ECR
-# URL or a DNS name — so treating ANY bracketed value as absent is safe and
-# needs no per-output special casing.
-case "${VALUE}" in
-  *'<'*|*'>'*) VALUE="" ;;
-esac
-
-# Diagnostic text is recognisable even after whitespace has been squeezed
-# out of it. Terraform prefixes every diagnostic with one of these words,
-# and none of them can begin a real identifier we read from state.
-case "${VALUE}" in
-  Warning:*|Error:*|Note:*|Nooutputsfound*) VALUE="" ;;
-esac
 
 # A bare "null" is what terraform prints for an output defined but unset.
 if [ "${VALUE}" = "null" ]; then
-  VALUE=""
+  printf ''
+  exit 0
 fi
 
-# Final shape gate. Every output this project reads (cluster name, vpc id,
-# ECR URL, role ARN, CIDR, log group) is a single token of printable,
-# non-space characters drawn from a conservative identifier alphabet. Any
-# leftover prose contains punctuation outside this set — a comma, a pipe
-# from a diagnostic box, a quote — and is rejected as absent. This is the
-# backstop that makes the helper correct no matter how the streams arrive.
-if ! printf '%s' "${VALUE}" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._:/@-]*$'; then
-  VALUE=""
+# POSITIVE VALIDATION. Every output this project reads is an AWS identifier
+# or URL: cluster names, VPC ids, ECR registry URLs, role ARNs, CIDRs, log
+# group names. All are a single token drawn from this character set, with no
+# spaces. Terraform's diagnostics always contain spaces, so requiring a
+# space-free token rejects them without needing to know their text.
+#
+# Deliberately permissive about WHICH characters (so a new output type does
+# not need a code change here) but strict about the SHAPE: one token, no
+# whitespace, reasonable length.
+if ! printf '%s' "${VALUE}" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}$'; then
+  printf ''
+  exit 0
 fi
 
 printf '%s' "${VALUE}"
